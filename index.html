@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="th" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Arthy Investment Coach</title>
+  <meta name="description" content="Learn investing through a simulated portfolio of stocks and ETFs">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { DEFAULT: '#10b981', dark: '#059669' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="dark bg-slate-950 text-white overscroll-none">
+
+  <div id="app" class="max-w-md mx-auto min-h-screen flex flex-col relative bg-slate-950">
+
+    <!-- ── TOP HEADER ── -->
+    <header class="bg-slate-900/95 backdrop-blur-sm px-4 pt-safe-top pb-3 pt-3 flex items-center justify-between sticky top-0 z-40 border-b border-slate-800">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-lg">📈</span>
+          <h1 class="text-base font-bold text-white leading-tight">Arthy Investment Coach</h1>
+        </div>
+        <p class="text-xs text-slate-500 ml-7">Learn investing through a simulated portfolio</p>
+      </div>
+      <div class="text-right">
+        <span class="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-lg px-2 py-0.5">📚 Learning Only</span>
+      </div>
+    </header>
+
+    <!-- ── MAIN CONTENT ── -->
+    <main class="flex-1 overflow-y-auto pb-24" id="main-scroll">
+
+      <!-- SCREEN: DASHBOARD -->
+      <div id="screen-dashboard" class="screen p-4 space-y-4">
+        <div id="dash-summary"></div>
+        <div id="dash-performers"></div>
+        <div id="dash-warnings"></div>
+        <div id="dash-allocation"></div>
+      </div>
+
+      <!-- SCREEN: PORTFOLIO -->
+      <div id="screen-portfolio" class="screen hidden p-4 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xl font-bold text-white">My Portfolio</h2>
+          <button onclick="openAddForm()" class="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium px-4 py-2 rounded-full transition-colors active:scale-95">
+            + Add
+          </button>
+        </div>
+        <div id="portfolio-list" class="space-y-3"></div>
+      </div>
+
+      <!-- SCREEN: COACH -->
+      <div id="screen-coach" class="screen hidden p-4 space-y-4">
+        <div>
+          <h2 class="text-xl font-bold text-white">AI Coach</h2>
+          <p class="text-sm text-slate-400">Portfolio analysis for learning</p>
+        </div>
+        <div id="coach-content" class="space-y-4"></div>
+      </div>
+
+      <!-- SCREEN: SETTINGS -->
+      <div id="screen-settings" class="screen hidden p-4 space-y-4">
+        <h2 class="text-xl font-bold text-white">Settings</h2>
+        <div id="settings-content" class="space-y-4"></div>
+      </div>
+
+    </main>
+
+    <!-- ── BOTTOM NAVIGATION ── -->
+    <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-slate-900/95 backdrop-blur-sm border-t border-slate-800 z-40 pb-safe-bottom">
+      <div class="flex items-stretch">
+
+        <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
+          onclick="navigateTo('dashboard')" data-screen="dashboard">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+          </svg>
+          <span class="text-xs">Home</span>
+        </button>
+
+        <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
+          onclick="navigateTo('portfolio')" data-screen="portfolio">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+          <span class="text-xs">Portfolio</span>
+        </button>
+
+        <!-- FAB Add Button -->
+        <button class="flex-1 flex flex-col items-center py-2 gap-0.5 text-slate-500 transition-colors active:scale-95"
+          onclick="openAddForm()">
+          <div class="w-10 h-10 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg shadow-emerald-500/30 -mt-3">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
+            </svg>
+          </div>
+          <span class="text-xs mt-0.5">Add</span>
+        </button>
+
+        <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
+          onclick="navigateTo('coach')" data-screen="coach">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+          </svg>
+          <span class="text-xs">Coach</span>
+        </button>
+
+        <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
+          onclick="navigateTo('settings')" data-screen="settings">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          <span class="text-xs">Settings</span>
+        </button>
+
+      </div>
+    </nav>
+
+    <!-- ── MODAL: ADD / EDIT HOLDING ── -->
+    <div id="modal-holding" class="fixed inset-0 z-50 hidden">
+      <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" onclick="closeModal()"></div>
+      <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-slate-900 rounded-t-3xl max-h-[92vh] flex flex-col">
+        <!-- Modal Header -->
+        <div class="flex items-center justify-between px-5 py-4 border-b border-slate-800 shrink-0">
+          <h3 id="modal-title" class="text-lg font-bold text-white">Add Holding</h3>
+          <button onclick="closeModal()" class="w-8 h-8 flex items-center justify-center rounded-full bg-slate-800 text-slate-400 hover:text-white active:scale-95">✕</button>
+        </div>
+        <!-- Modal Body (scrollable) -->
+        <div class="overflow-y-auto flex-1">
+          <form id="holding-form" class="p-5 space-y-6" onsubmit="return false;"></form>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── TOAST ── -->
+    <div id="toast" class="fixed top-16 left-1/2 -translate-x-1/2 z-50 hidden w-full max-w-xs px-4 pointer-events-none">
+      <div id="toast-inner" class="bg-slate-800 text-white text-sm rounded-2xl px-4 py-3 shadow-xl text-center border border-slate-700"></div>
+    </div>
+
+  </div><!-- /app -->
+
+  <script src="app.js"></script>
+</body>
+</html>

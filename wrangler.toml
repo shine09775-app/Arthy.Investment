@@ -1,0 +1,60 @@
+# ============================================================
+# Arthy Investment Coach — wrangler.toml
+# Cloudflare Pages + Functions + D1 + KV
+# ============================================================
+#
+# SETUP STEPS:
+#
+# 1. Install Wrangler:
+#    npm install -g wrangler
+#    wrangler login
+#
+# 2. Create KV namespace (Phase 2 — quote cache):
+#    wrangler kv:namespace create QUOTE_CACHE
+#    → Copy the id below
+#
+# 3. Create D1 database (Phase 3 — portfolio storage):
+#    wrangler d1 create arthy-portfolio
+#    → Copy the database_id below
+#    wrangler d1 execute arthy-portfolio --file=schema.sql
+#
+# 4. Set API key secret (Phase 2 — Finnhub / Polygon):
+#    wrangler pages secret put STOCK_API_KEY
+#    → Paste your key when prompted. NEVER put it in this file.
+#
+# 5. Deploy:
+#    wrangler pages deploy .
+#
+# ============================================================
+
+name                  = "arthy-investment-coach"
+pages_build_output_dir = "."
+compatibility_date    = "2025-06-05"
+
+# ── Phase 2: KV cache for stock quotes ─────────────────────
+[[kv_namespaces]]
+binding = "QUOTE_CACHE"
+id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# ── Phase 3: D1 database for portfolio storage ─────────────
+[[d1_databases]]
+binding       = "DB"
+database_name = "arthy-portfolio"
+database_id   = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# ── Optional non-secret vars ────────────────────────────────
+[vars]
+PORTFOLIO_ID = "arthy-001"
+
+# ── Secrets (set via dashboard or `wrangler pages secret put`) ──
+# STOCK_API_KEY     = your Finnhub or Polygon.io API key
+# ANTHROPIC_API_KEY = for Phase 4 AI Coach (future)
+
+# ── Local dev (wrangler pages dev .) ────────────────────────
+# When running locally:
+#   - D1 is mocked in memory (data lost on restart)
+#   - KV is mocked in memory
+#   - Secrets must be set in .dev.vars (never commit this file!)
+#
+# Example .dev.vars:
+#   STOCK_API_KEY=your_key_here

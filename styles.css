@@ -1,0 +1,50 @@
+/* Arthy Investment Coach — styles.css
+   Minimal custom styles only. Tailwind handles everything else. */
+
+/* ── Safe area insets for notch / home-bar devices ── */
+.pt-safe-top    { padding-top: env(safe-area-inset-top, 0px); }
+.pb-safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* ── Smooth page-level scrolling ── */
+#main-scroll {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* ── Hide number input spinners ── */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; }
+
+/* ── Custom scrollbar (desktop) ── */
+::-webkit-scrollbar        { width: 4px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: #334155; border-radius: 9999px; }
+
+/* ── Date input colour on dark background ── */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.6);
+  cursor: pointer;
+}
+
+/* ── Prevent rubber-band on iOS body scroll ── */
+body { overscroll-behavior: none; }
+
+/* ── Health-score ring animation ── */
+circle[stroke-dashoffset] {
+  transition: stroke-dashoffset 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Bottom nav active dot indicator ── */
+.nav-btn[data-screen].active::after {
+  content: '';
+  display: block;
+  width: 4px;
+  height: 4px;
+  background: #10b981;
+  border-radius: 9999px;
+  margin: 2px auto 0;
+}

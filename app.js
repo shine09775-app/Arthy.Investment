@@ -1,0 +1,1291 @@
+// ============================================================
+// Arthy Investment Coach — app.js
+// Phase 1 : LocalStorage  (runs anywhere, no backend needed)
+// Phase 2 : fetchQuote()  calls /api/quote  (Cloudflare Worker / Pages Function)
+// Phase 3 : D1 storage    calls /api/portfolio & /api/holdings (Cloudflare D1)
+// ============================================================
+
+'use strict';
+
+// ── CONSTANTS ──────────────────────────────────────────────
+
+const APP_VERSION  = '2.0.0';
+const STORAGE_KEY  = 'arthy_portfolio_v1';
+const DEFAULT_FX   = 36.5;          // THB per USD fallback
+const PORTFOLIO_ID = 'arthy-001';   // Fixed single-user ID for Phase 3
+
+const ASSET_TYPES = ['ETF', 'Stock', 'Bond', 'Crypto'];
+const RISK_LEVELS = ['Low', 'Medium', 'Medium-High', 'High'];
+const CATEGORIES  = [
+  'Core ETF', 'Growth ETF', 'Dividend ETF', 'Sector ETF',
+  'Individual Stock', 'Dividend / Defensive', 'Consumer',
+  'Technology', 'Financial', 'Energy', 'Healthcare',
+];
+
+// ── ENVIRONMENT DETECTION ──────────────────────────────────
+
+// True when running locally via file:// or localhost
+// False when deployed to Cloudflare Pages → use API (Phase 3)
+const IS_LOCAL = (() => {
+  const h = location.hostname;
+  return h === '' || h === 'localhost' || h === '127.0.0.1'
+      || location.protocol === 'file:';
+})();
+
+// ── STATE ──────────────────────────────────────────────────
+
+let portfolio     = { holdings: [], lastUpdated: null };
+let currentScreen = 'dashboard';
+let editingId     = null;
+
+// ── PHASE 3: API STORAGE LAYER ─────────────────────────────
+// When IS_LOCAL is false, the app uses these API calls.
+// Functions fall back to LocalStorage if the API is unreachable.
+
+async function apiGetPortfolio() {
+  const res = await fetch('/api/portfolio');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function apiAddHolding(data) {
+  const res = await fetch('/api/holdings', {
+    method : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body   : JSON.stringify({ ...data, portfolioId: PORTFOLIO_ID }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function apiUpdateHolding(id, data) {
+  const res = await fetch(`/api/holdings/${id}`, {
+    method : 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body   : JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function apiDeleteHolding(id) {
+  const res = await fetch(`/api/holdings/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+// ── LOCALSTORAGE ───────────────────────────────────────────
+
+function lsLoad() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) portfolio = JSON.parse(raw);
+  } catch (e) {
+    portfolio = { holdings: [], lastUpdated: null };
+  }
+}
+
+function lsSave() {
+  try {
+    portfolio.lastUpdated = new Date().toISOString();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(portfolio));
+  } catch (e) {
+    showToast('Could not save data to LocalStorage', 'error');
+  }
+}
+
+// ── MAIN LOAD / SAVE (adapter) ─────────────────────────────
+
+async function loadPortfolio() {
+  if (!IS_LOCAL) {
+    try {
+      const data = await apiGetPortfolio();
+      portfolio  = data;
+      return;
+    } catch (e) {
+      console.warn('API unavailable, falling back to LocalStorage:', e);
+    }
+  }
+  lsLoad();
+}
+
+function savePortfolio() {
+  // Always keep LocalStorage in sync as offline backup
+  lsSave();
+}
+
+// ── DATA MIGRATION ─────────────────────────────────────────
+// Converts old Phase-1 Thai strings to English on first load.
+
+function migrateData() {
+  const thaiToEn = {
+    assetType : { 'หุ้น': 'Stock' },
+    riskLevel : {
+      'ต่ำ': 'Low', 'ปานกลาง': 'Medium',
+      'ปานกลาง-สูง': 'Medium-High', 'สูง': 'High',
+    },
+  };
+
+  let changed = false;
+  portfolio.holdings = portfolio.holdings.map(h => {
+    const newH = { ...h };
+    if (thaiToEn.assetType[h.assetType]) {
+      newH.assetType = thaiToEn.assetType[h.assetType];
+      changed = true;
+    }
+    if (thaiToEn.riskLevel[h.riskLevel]) {
+      newH.riskLevel = thaiToEn.riskLevel[h.riskLevel];
+      changed = true;
+    }
+    return newH;
+  });
+
+  if (changed) savePortfolio();
+}
+
+// ── CRUD ───────────────────────────────────────────────────
+
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+async function addHolding(data) {
+  const holding = {
+    id: generateId(),
+    ...data,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  portfolio.holdings.push(holding);
+  savePortfolio();
+
+  if (!IS_LOCAL) {
+    try { await apiAddHolding(holding); } catch (e) {
+      console.warn('API add failed (local copy saved):', e);
+    }
+  }
+  return holding;
+}
+
+async function updateHolding(id, data) {
+  const idx = portfolio.holdings.findIndex(h => h.id === id);
+  if (idx === -1) return null;
+
+  portfolio.holdings[idx] = {
+    ...portfolio.holdings[idx],
+    ...data,
+    id,
+    updatedAt: new Date().toISOString(),
+  };
+  savePortfolio();
+
+  if (!IS_LOCAL) {
+    try { await apiUpdateHolding(id, portfolio.holdings[idx]); } catch (e) {
+      console.warn('API update failed (local copy saved):', e);
+    }
+  }
+  return portfolio.holdings[idx];
+}
+
+async function deleteHolding(id) {
+  portfolio.holdings = portfolio.holdings.filter(h => h.id !== id);
+  savePortfolio();
+
+  if (!IS_LOCAL) {
+    try { await apiDeleteHolding(id); } catch (e) {
+      console.warn('API delete failed (local copy saved):', e);
+    }
+  }
+}
+
+// ── CALCULATIONS ───────────────────────────────────────────
+
+function calcHolding(h) {
+  const cpFx = h.currentPriceCurrency === 'USD' ? (h.fxRate || DEFAULT_FX) : 1;
+  const currentValueTHB = h.quantity * h.currentPrice * cpFx;
+
+  const buyFx = h.buyCurrency === 'USD' ? (h.fxRate || DEFAULT_FX) : 1;
+  const totalCostTHB = h.totalCostTHB > 0
+    ? h.totalCostTHB
+    : h.quantity * h.averageBuyPrice * buyFx;
+
+  const gainLossTHB     = currentValueTHB - totalCostTHB;
+  const gainLossPercent = totalCostTHB > 0
+    ? (gainLossTHB / totalCostTHB) * 100
+    : 0;
+
+  return { ...h, currentValueTHB, totalCostTHB, gainLossTHB, gainLossPercent };
+}
+
+function calcPortfolio() {
+  const holdings = portfolio.holdings.map(calcHolding);
+
+  const totalCostTHB      = holdings.reduce((s, h) => s + h.totalCostTHB, 0);
+  const totalValueTHB     = holdings.reduce((s, h) => s + h.currentValueTHB, 0);
+  const totalGainLossTHB  = totalValueTHB - totalCostTHB;
+  const totalGainLossPercent = totalCostTHB > 0
+    ? (totalGainLossTHB / totalCostTHB) * 100 : 0;
+
+  const byMarket    = {};
+  const byAssetType = {};
+  holdings.forEach(h => {
+    byMarket[h.market]       = (byMarket[h.market]       || 0) + h.currentValueTHB;
+    byAssetType[h.assetType] = (byAssetType[h.assetType] || 0) + h.currentValueTHB;
+  });
+
+  const toAlloc = obj =>
+    Object.entries(obj)
+      .map(([label, value]) => ({
+        label, value,
+        pct: totalValueTHB > 0 ? (value / totalValueTHB) * 100 : 0,
+      }))
+      .sort((a, b) => b.pct - a.pct);
+
+  const sorted = [...holdings].sort((a, b) => b.gainLossPercent - a.gainLossPercent);
+
+  return {
+    holdings,
+    totalCostTHB, totalValueTHB, totalGainLossTHB, totalGainLossPercent,
+    allocationByMarket  : toAlloc(byMarket),
+    allocationByAssetType: toAlloc(byAssetType),
+    best : sorted[0]                 || null,
+    worst: sorted[sorted.length - 1] || null,
+  };
+}
+
+// ── RULE CHECKS ────────────────────────────────────────────
+
+function checkRules(metrics) {
+  const { holdings, totalValueTHB } = metrics;
+  const W = [];
+  if (!holdings.length || totalValueTHB === 0) return W;
+
+  // Rule 1 — single holding > 20 %
+  holdings.forEach(h => {
+    const pct = (h.currentValueTHB / totalValueTHB) * 100;
+    if (pct > 20) W.push({
+      level: 'warning', id: `conc-${h.id}`,
+      title  : `${h.symbol} is ${pct.toFixed(1)}% of portfolio`,
+      message: 'This position exceeds 20% of your portfolio. Review your conviction and risk tolerance.',
+    });
+  });
+
+  // Rule 2 — individual stocks > 40 %
+  const stockVal = holdings
+    .filter(h => h.assetType === 'Stock' || h.assetType === 'หุ้น')
+    .reduce((s, h) => s + h.currentValueTHB, 0);
+  const stockPct = (stockVal / totalValueTHB) * 100;
+  if (stockPct > 40) W.push({
+    level: 'warning', id: 'stocks-heavy',
+    title  : `Individual stocks at ${stockPct.toFixed(1)}%`,
+    message: 'Individual stocks make up a large portion. Learn more about diversification.',
+  });
+
+  // Rule 3 — no ETF
+  if (!holdings.some(h => h.assetType === 'ETF')) W.push({
+    level: 'info', id: 'no-etf',
+    title  : 'No ETF in portfolio',
+    message: 'Adding a broad-market ETF like VOO can improve diversification.',
+  });
+
+  // Rule 4 — down > 10 % and no note
+  holdings.forEach(h => {
+    if (h.gainLossPercent < -10 && !(h.learningNote || '').trim()) W.push({
+      level: 'danger', id: `loss-note-${h.id}`,
+      title  : `${h.symbol} is down ${Math.abs(h.gainLossPercent).toFixed(1)}% with no learning note`,
+      message: 'Write a learning note before deciding to buy more or sell.',
+    });
+  });
+
+  // Rule 5 — USD holding missing FX rate
+  holdings.forEach(h => {
+    if (h.buyCurrency === 'USD' && !(h.fxRate > 0)) W.push({
+      level: 'warning', id: `fx-${h.id}`,
+      title  : `${h.symbol} is missing an FX rate`,
+      message: 'US stocks need a USD/THB exchange rate to calculate correct THB value.',
+    });
+  });
+
+  return W;
+}
+
+// ── AI COACH (RULE-BASED) ──────────────────────────────────
+
+function generateCoachSummary() {
+  const m = calcPortfolio();
+  const { holdings, totalValueTHB, totalGainLossPercent, allocationByAssetType } = m;
+
+  if (!holdings.length) {
+    return {
+      healthScore  : 0,
+      lessonOfMonth: "No portfolio data yet. Add a holding or load sample data to get started.",
+      whatWentWell : ['You launched the app — great first step!'],
+      whatToReview : ['Try adding your first ETF, like VOO or QQQM, to begin tracking.'],
+      questions    : [
+        'What is an ETF and why do long-term investors prefer them?',
+        'What does diversification mean in investing?',
+        'What is your first investment goal?',
+      ],
+      riskNote: '',
+    };
+  }
+
+  // ── Health score ──
+  let score  = 100;
+  const hasETF = holdings.some(h => h.assetType === 'ETF');
+  if (!hasETF) score -= 20;
+
+  const etfEntry = allocationByAssetType.find(t => t.label === 'ETF');
+  const etfPct   = etfEntry ? etfEntry.pct : 0;
+  if (hasETF && etfPct < 30 && holdings.length > 2) score -= 10;
+
+  const stockPct = holdings
+    .filter(h => h.assetType === 'Stock' || h.assetType === 'หุ้น')
+    .reduce((s, h) => s + (h.currentValueTHB / totalValueTHB) * 100, 0);
+  if (stockPct > 50) score -= 10;
+
+  const maxConc = Math.max(...holdings.map(h => (h.currentValueTHB / totalValueTHB) * 100));
+  if (maxConc > 30) score -= 10;
+  if (maxConc > 50) score -= 10;
+
+  const noNoteCount = holdings.filter(h => !(h.learningNote || '').trim()).length;
+  score -= noNoteCount * 5;
+  if (totalGainLossPercent < -15) score -= 10;
+  score = Math.max(0, Math.min(100, score));
+
+  // ── What went well ──
+  const well = [];
+  if (hasETF)      well.push('Portfolio has ETFs as a core — good for diversification.');
+  if (etfPct >= 50) well.push(`ETFs make up ${etfPct.toFixed(0)}% of the portfolio — well balanced.`);
+  if (m.best && m.best.gainLossPercent > 3)
+    well.push(`${m.best.symbol} is up +${m.best.gainLossPercent.toFixed(1)}% — solid performance.`);
+  if (totalGainLossPercent > 0)
+    well.push(`Portfolio is overall positive at +${totalGainLossPercent.toFixed(1)}% 👍`);
+  const notedCount = holdings.filter(h => (h.learningNote || '').trim()).length;
+  if (notedCount > 0)
+    well.push(`${notedCount} holding(s) have learning notes — great habit!`);
+  if (!well.length)
+    well.push('You started building a portfolio — that is the most important first step.');
+
+  // ── What to review ──
+  const review = [];
+  if (!hasETF)
+    review.push('Consider adding a broad-market ETF like VOO or QQQM for diversification.');
+  if (maxConc > 25) {
+    const top = holdings.reduce((a, b) => a.currentValueTHB > b.currentValueTHB ? a : b);
+    review.push(`${top.symbol} has the highest weight — do you still believe in this position?`);
+  }
+  if (m.worst && m.worst.gainLossPercent < -3)
+    review.push(`${m.worst.symbol} is down ${Math.abs(m.worst.gainLossPercent).toFixed(1)}% — read the news and understand why.`);
+  if (noNoteCount > 0)
+    review.push(`${noNoteCount} holding(s) have no learning note. Write down what you know about them.`);
+  if (!review.length)
+    review.push('Portfolio looks healthy. Study basic financial statement reading as a next step.');
+
+  // ── Lesson of month ──
+  let lesson;
+  if (!hasETF) {
+    lesson = 'This month, study what an ETF is and why many long-term investors use a broad-market ETF as their portfolio core.';
+  } else if (etfPct >= 50) {
+    lesson = `This month, Arthy learned that having ETFs as the core (${etfPct.toFixed(0)}%) reduces volatility and removes the need to follow every company's news.`;
+  } else if (stockPct > 40) {
+    lesson = 'This month, revisit whether you truly understand the business of each individual stock — what is their revenue model and key risks?';
+  } else {
+    lesson = `Portfolio has a balanced mix of ETFs and individual stocks. Next: study basic financial statement reading (Revenue, Net Profit, P/E Ratio).`;
+  }
+
+  // ── Questions ──
+  const qs = [];
+  if (!hasETF || etfPct < 30)
+    qs.push('Which type of ETF best fits my long-term investment goal?');
+  if (m.worst && m.worst.gainLossPercent < 0)
+    qs.push(`Why is ${m.worst.symbol} declining — is the business still strong?`);
+  if (maxConc > 20)
+    qs.push('If my largest position drops 30%, how much does my total portfolio lose?');
+  qs.push('What do I want to learn about investing next month?');
+  if (qs.length < 3)
+    qs.push('How can I invest consistently every month?');
+
+  // ── Risk note ──
+  const hasUS = holdings.some(h => h.market === 'US');
+  const hasTH = holdings.some(h => h.market === 'TH');
+  let riskNote = '';
+  if (hasUS && hasTH)
+    riskNote = 'Portfolio holds both US and Thai stocks. USD/THB exchange rate fluctuations affect your THB value.';
+  else if (hasUS)
+    riskNote = 'All positions are in USD. Monitor the USD/THB exchange rate as it affects your total THB value.';
+  else if (hasTH)
+    riskNote = 'All positions are in Thai stocks. Diversifying internationally could reduce country-specific risk.';
+
+  return { healthScore: score, lessonOfMonth: lesson, whatWentWell: well, whatToReview: review, questions: qs.slice(0, 3), riskNote };
+}
+
+// ── PHASE 2: FETCH QUOTE ───────────────────────────────────
+
+/**
+ * Fetch real-time stock quote.
+ * - Phase 1 (local)       : returns null → manual price only
+ * - Phase 2 (Cloudflare)  : calls /api/quote → Cloudflare Pages Function
+ *                           which hits Finnhub/Polygon and caches in KV
+ *
+ * @param {string} symbol  e.g. "AAPL"
+ * @param {string} market  "US" | "TH"
+ * @returns {Promise<NormalizedQuote|null>}
+ */
+async function fetchQuote(symbol, market) {
+  if (IS_LOCAL) return null;   // Phase 1: manual only
+
+  try {
+    const res = await fetch(
+      `/api/quote?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`
+    );
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn('fetchQuote failed:', e);
+    return null;
+  }
+}
+
+// Auto-refresh prices for all US holdings (Phase 2)
+async function refreshAllPrices() {
+  if (IS_LOCAL) {
+    showToast('Price auto-fetch is available on Cloudflare Pages (Phase 2)', 'info');
+    return;
+  }
+
+  showToast('Refreshing prices…');
+  let updated = 0;
+  for (const h of portfolio.holdings) {
+    if (h.market === 'US') {
+      const q = await fetchQuote(h.symbol, 'US');
+      if (q && q.price > 0) {
+        await updateHolding(h.id, { currentPrice: q.price });
+        updated++;
+      }
+    }
+  }
+  showToast(`${updated} US price(s) updated ✅`);
+  renderCurrentScreen();
+}
+
+// ── DEMO DATA ──────────────────────────────────────────────
+
+async function loadDemoData() {
+  const demos = [
+    {
+      symbol: 'VOO', market: 'US', name: 'Vanguard S&P 500 ETF',
+      assetType: 'ETF', category: 'Core ETF', riskLevel: 'Medium',
+      quantity: 0.5, averageBuyPrice: 450, buyCurrency: 'USD',
+      fxRate: 36.5, totalCostTHB: 8212.50,
+      currentPrice: 480, currentPriceCurrency: 'USD', buyDate: '2026-01-15',
+      learningNote: 'Tracks the S&P 500 — top 500 US companies. Great diversification without picking individual stocks. Grows when the US economy grows.',
+    },
+    {
+      symbol: 'QQQM', market: 'US', name: 'Invesco Nasdaq 100 ETF',
+      assetType: 'ETF', category: 'Growth ETF', riskLevel: 'Medium-High',
+      quantity: 0.3, averageBuyPrice: 190, buyCurrency: 'USD',
+      fxRate: 36.5, totalCostTHB: 2083.50,
+      currentPrice: 205, currentPriceCurrency: 'USD', buyDate: '2026-02-01',
+      learningNote: 'Tracks Nasdaq 100 — tech-heavy with Apple, Microsoft, Nvidia. Higher growth potential than VOO but also more volatile. Best held long-term.',
+    },
+    {
+      symbol: 'AAPL', market: 'US', name: 'Apple Inc.',
+      assetType: 'Stock', category: 'Individual Stock', riskLevel: 'Medium',
+      quantity: 0.25, averageBuyPrice: 185, buyCurrency: 'USD',
+      fxRate: 36.5, totalCostTHB: 1690.63,
+      currentPrice: 195, currentPriceCurrency: 'USD', buyDate: '2026-03-10',
+      learningNote: 'Apple earns from iPhone, Mac, iPad and services (App Store, iCloud, Apple Pay). Very strong ecosystem — customers rarely switch brands.',
+    },
+    {
+      symbol: 'ADVANC', market: 'TH', name: 'Advanced Info Service (AIS)',
+      assetType: 'Stock', category: 'Dividend / Defensive', riskLevel: 'Medium',
+      quantity: 10, averageBuyPrice: 225, buyCurrency: 'THB',
+      fxRate: 1, totalCostTHB: 2250,
+      currentPrice: 240, currentPriceCurrency: 'THB', buyDate: '2026-01-20',
+      learningNote: 'AIS is Thailand\'s #1 telecom with 40M+ customers. Pays regular dividends. Defensive business — people keep paying for phone plans even in a recession.',
+    },
+    {
+      symbol: 'CPALL', market: 'TH', name: 'CP All (7-Eleven Thailand)',
+      assetType: 'Stock', category: 'Consumer', riskLevel: 'Medium',
+      quantity: 20, averageBuyPrice: 58, buyCurrency: 'THB',
+      fxRate: 1, totalCostTHB: 1160,
+      currentPrice: 55, currentPriceCurrency: 'THB', buyDate: '2026-02-15',
+      learningNote: '',
+    },
+  ];
+
+  portfolio.holdings = demos.map(d => ({
+    id: generateId(), ...d,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }));
+
+  savePortfolio();
+  renderCurrentScreen();
+  showToast('Loaded 5 sample holdings 🎉');
+}
+
+async function clearAllData() {
+  portfolio = { holdings: [], lastUpdated: null };
+  savePortfolio();
+  renderCurrentScreen();
+  showToast('All data cleared');
+}
+
+// ── NAVIGATION ─────────────────────────────────────────────
+
+function navigateTo(screen) {
+  currentScreen = screen;
+
+  document.querySelectorAll('.screen').forEach(el => el.classList.add('hidden'));
+  document.getElementById(`screen-${screen}`)?.classList.remove('hidden');
+
+  document.querySelectorAll('.nav-btn[data-screen]').forEach(btn => {
+    const active = btn.dataset.screen === screen;
+    btn.classList.toggle('text-emerald-400', active);
+    btn.classList.toggle('text-slate-500',   !active);
+  });
+
+  document.getElementById('main-scroll')?.scrollTo(0, 0);
+  renderCurrentScreen();
+}
+
+function renderCurrentScreen() {
+  if      (currentScreen === 'dashboard') renderDashboard();
+  else if (currentScreen === 'portfolio') renderPortfolio();
+  else if (currentScreen === 'coach')     renderCoach();
+  else if (currentScreen === 'settings')  renderSettings();
+}
+
+// ── RENDER: DASHBOARD ──────────────────────────────────────
+
+function renderDashboard() {
+  const m   = calcPortfolio();
+  const W   = checkRules(m);
+  const { totalCostTHB, totalValueTHB, totalGainLossTHB, totalGainLossPercent,
+          best, worst, allocationByMarket, allocationByAssetType } = m;
+
+  if (!m.holdings.length) {
+    document.getElementById('dash-summary').innerHTML = `
+      <div class="text-center py-16 space-y-4">
+        <div class="text-7xl">📈</div>
+        <div>
+          <h3 class="text-xl font-bold text-white">Start Arthy's First Portfolio</h3>
+          <p class="text-slate-400 text-sm mt-1">Add stocks or ETFs to begin your investment learning journey</p>
+        </div>
+        <div class="flex flex-col gap-3 items-center">
+          <button onclick="openAddForm()"
+            class="bg-emerald-500 hover:bg-emerald-600 text-white px-8 py-3 rounded-2xl font-semibold transition-colors active:scale-95">
+            + Add First Holding
+          </button>
+          <button onclick="loadDemoData()" class="text-slate-400 text-sm underline underline-offset-2">
+            or load sample data
+          </button>
+        </div>
+      </div>`;
+    ['dash-performers','dash-warnings','dash-allocation'].forEach(id =>
+      (document.getElementById(id).innerHTML = ''));
+    return;
+  }
+
+  const isPos = totalGainLossTHB >= 0;
+  const gcls  = isPos ? 'text-emerald-400' : 'text-red-400';
+  const gSign = isPos ? '+' : '';
+  const gIcon = isPos ? '▲' : '▼';
+
+  document.getElementById('dash-summary').innerHTML = `
+    <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-3xl p-5 border border-slate-700/60">
+      <p class="text-slate-400 text-sm mb-1">Current Portfolio Value</p>
+      <p class="text-4xl font-bold text-white tracking-tight">${fmt(totalValueTHB)}</p>
+      <p class="text-sm ${gcls} mt-2 font-medium">
+        ${gIcon} ${fmt(Math.abs(totalGainLossTHB))}
+        <span class="text-xs ml-1">(${gSign}${totalGainLossPercent.toFixed(2)}%)</span>
+      </p>
+      <p class="text-xs text-slate-500 mt-1">Cost basis ${fmt(totalCostTHB)}</p>
+    </div>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+        <p class="text-slate-400 text-xs mb-1">Total Cost</p>
+        <p class="text-lg font-bold text-white">${fmt(totalCostTHB)}</p>
+      </div>
+      <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+        <p class="text-slate-400 text-xs mb-1">Gain / Loss</p>
+        <p class="text-lg font-bold ${gcls}">${gSign}${fmt(totalGainLossTHB)}</p>
+      </div>
+    </div>`;
+
+  // Performers
+  let perfHTML = '';
+  if (best || worst) {
+    perfHTML = `<div class="grid grid-cols-2 gap-3">`;
+    if (best) perfHTML += `
+      <div class="bg-slate-800/80 rounded-2xl p-4 border border-emerald-500/20">
+        <p class="text-xs text-slate-400 mb-1">⭐ Best Performer</p>
+        <p class="text-base font-bold text-white">${best.symbol}</p>
+        <p class="text-sm text-emerald-400 font-medium">${best.gainLossPercent >= 0 ? '+' : ''}${best.gainLossPercent.toFixed(1)}%</p>
+      </div>`;
+    if (worst && worst.id !== best?.id) perfHTML += `
+      <div class="bg-slate-800/80 rounded-2xl p-4 border border-red-500/20">
+        <p class="text-xs text-slate-400 mb-1">📉 Needs Review</p>
+        <p class="text-base font-bold text-white">${worst.symbol}</p>
+        <p class="text-sm text-red-400 font-medium">${worst.gainLossPercent >= 0 ? '+' : ''}${worst.gainLossPercent.toFixed(1)}%</p>
+      </div>`;
+    perfHTML += `</div>`;
+  }
+  document.getElementById('dash-performers').innerHTML = perfHTML;
+
+  // Warnings
+  const warnColors = { danger: 'border-red-500/30 bg-red-900/10', warning: 'border-amber-500/30 bg-amber-900/10', info: 'border-blue-500/30 bg-blue-900/10' };
+  const warnIcons  = { danger: '🚨', warning: '⚠️', info: 'ℹ️' };
+  let warnHTML = '';
+  if (W.length) {
+    warnHTML = `<div class="space-y-2"><p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Warnings</p>`;
+    W.forEach(w => { warnHTML += `
+      <div class="rounded-2xl p-3 border ${warnColors[w.level] || warnColors.warning}">
+        <p class="text-sm font-semibold text-white">${warnIcons[w.level]} ${w.title}</p>
+        <p class="text-xs text-slate-300 mt-0.5 leading-relaxed">${w.message}</p>
+      </div>`; });
+    warnHTML += `</div>`;
+  }
+  document.getElementById('dash-warnings').innerHTML = warnHTML;
+
+  // Allocation
+  const barColors = { US: 'bg-blue-500', TH: 'bg-orange-400', ETF: 'bg-emerald-500', Stock: 'bg-blue-400', Bond: 'bg-purple-400', Crypto: 'bg-yellow-400' };
+  const mkBars = (items, title) => {
+    if (!items.length) return '';
+    return `<div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-xs text-slate-400 mb-3">${title}</p>
+      <div class="space-y-3">
+        ${items.map(item => `
+          <div>
+            <div class="flex justify-between text-xs mb-1.5">
+              <span class="text-slate-300">${item.label}</span>
+              <span class="font-semibold text-white">${item.pct.toFixed(1)}%</span>
+            </div>
+            <div class="h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full ${barColors[item.label] || 'bg-slate-400'} rounded-full" style="width:${Math.min(item.pct,100)}%"></div>
+            </div>
+            <p class="text-xs text-slate-500 mt-0.5">${fmt(item.value)}</p>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  };
+
+  document.getElementById('dash-allocation').innerHTML = `
+    <div class="space-y-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Portfolio Allocation</p>
+      ${mkBars(allocationByMarket, 'By Market')}
+      ${mkBars(allocationByAssetType, 'By Asset Type')}
+    </div>`;
+}
+
+// ── RENDER: PORTFOLIO ──────────────────────────────────────
+
+function renderPortfolio() {
+  const m    = calcPortfolio();
+  const cont = document.getElementById('portfolio-list');
+
+  if (!m.holdings.length) {
+    cont.innerHTML = `
+      <div class="text-center py-16 space-y-3">
+        <div class="text-5xl">💼</div>
+        <p class="text-slate-400">No holdings yet</p>
+        <button onclick="openAddForm()" class="bg-emerald-500 text-white px-6 py-3 rounded-2xl font-medium active:scale-95">
+          + Add First Holding
+        </button>
+      </div>`;
+    return;
+  }
+
+  cont.innerHTML = m.holdings.map(h => {
+    const isPos    = h.gainLossTHB >= 0;
+    const gcls     = isPos ? 'text-emerald-400' : 'text-red-400';
+    const gSign    = isPos ? '+' : '';
+    const pct      = m.totalValueTHB > 0 ? (h.currentValueTHB / m.totalValueTHB * 100).toFixed(1) : '0.0';
+    const mktBadge = h.market === 'US' ? 'bg-blue-500/20 text-blue-300' : 'bg-orange-500/20 text-orange-300';
+    const hasNote  = (h.learningNote || '').trim().length > 0;
+    const noteSnip = hasNote ? h.learningNote.slice(0, 90) + (h.learningNote.length > 90 ? '…' : '') : '';
+
+    return `
+      <div class="bg-slate-800/80 rounded-2xl border border-slate-700/60 overflow-hidden">
+        <div class="p-4 space-y-3">
+          <div class="flex items-start justify-between">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-lg font-bold text-white">${h.symbol}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${mktBadge}">${h.market}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-slate-700 text-slate-300">${h.assetType}</span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5 truncate">${h.name}</p>
+              <p class="text-xs text-slate-500">${h.category} · ${pct}% of portfolio</p>
+            </div>
+            <div class="text-right ml-2 shrink-0">
+              <p class="text-base font-bold ${gcls}">${gSign}${h.gainLossPercent.toFixed(1)}%</p>
+              <p class="text-xs ${gcls}">${gSign}${fmt(h.gainLossTHB)}</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2">
+            <div class="bg-slate-900/60 rounded-xl p-2.5 text-center">
+              <p class="text-xs text-slate-500 mb-0.5">Qty</p>
+              <p class="text-sm font-semibold text-white">${h.quantity}</p>
+            </div>
+            <div class="bg-slate-900/60 rounded-xl p-2.5 text-center">
+              <p class="text-xs text-slate-500 mb-0.5">Cost</p>
+              <p class="text-sm font-semibold text-white">${fmt(h.totalCostTHB)}</p>
+            </div>
+            <div class="bg-slate-900/60 rounded-xl p-2.5 text-center">
+              <p class="text-xs text-slate-500 mb-0.5">Value</p>
+              <p class="text-sm font-semibold text-white">${fmt(h.currentValueTHB)}</p>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between text-xs text-slate-400">
+            <span>Current: <span class="text-white font-medium">${h.currentPrice} ${h.currentPriceCurrency}</span></span>
+            <span>Avg buy: ${h.averageBuyPrice} ${h.buyCurrency}</span>
+          </div>
+
+          ${hasNote ? `
+          <div class="bg-slate-900/60 rounded-xl p-3 border-l-2 border-emerald-500/50">
+            <p class="text-xs text-emerald-400 font-medium mb-0.5">📓 Learning Note</p>
+            <p class="text-xs text-slate-300 leading-relaxed">${noteSnip}</p>
+          </div>` : `
+          <p class="text-xs text-slate-500">📓 No learning note yet</p>`}
+        </div>
+
+        <div class="border-t border-slate-700/60 px-4 py-2.5 flex gap-2 justify-end">
+          <button onclick="openUpdatePriceModal('${h.id}')"
+            class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors active:scale-95">
+            💹 Price
+          </button>
+          <button onclick="openEditForm('${h.id}')"
+            class="text-xs px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors active:scale-95">
+            ✏️ Edit
+          </button>
+          <button onclick="confirmDelete('${h.id}', '${h.symbol}')"
+            class="text-xs px-3 py-1.5 rounded-lg bg-red-900/30 hover:bg-red-900/50 text-red-400 transition-colors active:scale-95">
+            🗑️
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ── RENDER: COACH ──────────────────────────────────────────
+
+function renderCoach() {
+  const s    = generateCoachSummary();
+  const cont = document.getElementById('coach-content');
+
+  const R    = 36;
+  const circ = 2 * Math.PI * R;
+  const off  = circ - (s.healthScore / 100) * circ;
+  const ringColor = s.healthScore >= 70 ? '#10b981' : s.healthScore >= 40 ? '#f59e0b' : '#ef4444';
+  const textColor = s.healthScore >= 70 ? 'text-emerald-400' : s.healthScore >= 40 ? 'text-amber-400' : 'text-red-400';
+
+  cont.innerHTML = `
+    <div class="bg-slate-800/80 rounded-3xl p-5 border border-slate-700/60 text-center">
+      <p class="text-sm text-slate-400 mb-4">Portfolio Health Score</p>
+      <div class="relative inline-flex items-center justify-center w-32 h-32 mb-4">
+        <svg class="w-32 h-32 -rotate-90" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="${R}" fill="none" stroke="#1e293b" stroke-width="8"/>
+          <circle cx="40" cy="40" r="${R}" fill="none"
+            stroke="${ringColor}" stroke-width="8"
+            stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+            stroke-linecap="round" style="transition:stroke-dashoffset 1s ease"/>
+        </svg>
+        <div class="absolute inset-0 flex flex-col items-center justify-center">
+          <span class="text-4xl font-bold ${textColor}">${s.healthScore}</span>
+          <span class="text-xs text-slate-500">/100</span>
+        </div>
+      </div>
+      <p class="text-sm text-slate-300 leading-relaxed">${s.lessonOfMonth}</p>
+    </div>
+
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-emerald-400 mb-3">✅ What's Working Well</p>
+      <ul class="space-y-2">
+        ${s.whatWentWell.map(item => `
+          <li class="flex gap-2.5 text-sm text-slate-300">
+            <span class="text-emerald-500 shrink-0 mt-0.5">•</span>
+            <span class="leading-relaxed">${item}</span>
+          </li>`).join('')}
+      </ul>
+    </div>
+
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-amber-400 mb-3">🔍 What to Review</p>
+      <ul class="space-y-2">
+        ${s.whatToReview.map(item => `
+          <li class="flex gap-2.5 text-sm text-slate-300">
+            <span class="text-amber-500 shrink-0 mt-0.5">•</span>
+            <span class="leading-relaxed">${item}</span>
+          </li>`).join('')}
+      </ul>
+    </div>
+
+    ${s.riskNote ? `
+    <div class="bg-blue-900/20 rounded-2xl p-4 border border-blue-500/20">
+      <p class="text-sm font-semibold text-blue-400 mb-2">🌏 Risk to Know</p>
+      <p class="text-sm text-slate-300 leading-relaxed">${s.riskNote}</p>
+    </div>` : ''}
+
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-purple-400 mb-3">💭 Questions for This Month</p>
+      <div class="space-y-2">
+        ${s.questions.map((q, i) => `
+          <div class="flex gap-3 bg-slate-900/60 rounded-xl p-3">
+            <span class="text-purple-400 font-bold text-sm shrink-0">${i + 1}</span>
+            <span class="text-sm text-slate-300 leading-relaxed">${q}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <div class="bg-amber-900/10 rounded-2xl p-4 border border-amber-500/20 text-center space-y-1">
+      <p class="text-xs text-amber-400 font-medium">⚠️ For learning only. Not investment advice.</p>
+    </div>`;
+}
+
+// ── RENDER: SETTINGS ───────────────────────────────────────
+
+function renderSettings() {
+  const holdingCount = portfolio.holdings.length;
+  const lastSaved    = portfolio.lastUpdated
+    ? new Date(portfolio.lastUpdated).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+    : '—';
+  const storageMode  = IS_LOCAL ? 'LocalStorage (Phase 1)' : 'Cloudflare D1 (Phase 3)';
+  const storageIcon  = IS_LOCAL ? '💾' : '☁️';
+
+  document.getElementById('settings-content').innerHTML = `
+    <div class="bg-slate-800/80 rounded-2xl p-5 border border-slate-700/60 text-center">
+      <div class="text-4xl mb-2">📈</div>
+      <p class="text-lg font-bold text-white">Arthy Investment Coach</p>
+      <p class="text-xs text-slate-400 mt-1">v${APP_VERSION} · Learn investing through a simulated portfolio</p>
+      <div class="mt-3 grid grid-cols-2 gap-3 text-center">
+        <div class="bg-slate-900/50 rounded-xl p-2.5">
+          <p class="text-xl font-bold text-emerald-400">${holdingCount}</p>
+          <p class="text-xs text-slate-400">Holdings</p>
+        </div>
+        <div class="bg-slate-900/50 rounded-xl p-2.5">
+          <p class="text-xs font-medium text-white leading-tight">${storageIcon} ${storageMode}</p>
+          <p class="text-xs text-slate-400 mt-0.5">Saved: ${lastSaved}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-white mb-3">Data Management</p>
+      <div class="space-y-2">
+
+        <button onclick="loadDemoData()"
+          class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left">
+          <span class="text-2xl shrink-0">🎯</span>
+          <div>
+            <p class="text-sm font-medium text-white">Load Sample Data</p>
+            <p class="text-xs text-slate-400">VOO, QQQM, AAPL, ADVANC, CPALL</p>
+          </div>
+        </button>
+
+        <button onclick="refreshAllPrices()"
+          class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left ${IS_LOCAL ? 'opacity-60' : ''}">
+          <span class="text-2xl shrink-0">🔄</span>
+          <div>
+            <p class="text-sm font-medium text-white">Refresh US Prices</p>
+            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment (Phase 2)' : 'Fetch latest prices from API'}</p>
+          </div>
+        </button>
+
+        <button onclick="exportData()"
+          class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left">
+          <span class="text-2xl shrink-0">📤</span>
+          <div>
+            <p class="text-sm font-medium text-white">Export Data (JSON)</p>
+            <p class="text-xs text-slate-400">Save portfolio to a file</p>
+          </div>
+        </button>
+
+        <button onclick="confirmClearAll()"
+          class="w-full flex items-center gap-3 bg-red-900/20 hover:bg-red-900/30 rounded-2xl p-3.5 transition-colors active:scale-95 text-left border border-red-500/20">
+          <span class="text-2xl shrink-0">🗑️</span>
+          <div>
+            <p class="text-sm font-medium text-red-400">Clear All Data</p>
+            <p class="text-xs text-red-400/60">Includes all learning notes — cannot be undone</p>
+          </div>
+        </button>
+
+      </div>
+    </div>
+
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-white mb-3">🛣️ Road Map</p>
+      <div class="space-y-2.5">
+        ${[
+          ['✅', 'Phase 1', 'LocalStorage — fully working', 'text-emerald-400'],
+          ['✅', 'Phase 2', 'Cloudflare Worker — US price auto-fetch', 'text-emerald-400'],
+          [IS_LOCAL ? '⏳' : '✅', 'Phase 3', 'Cloudflare D1 — permanent cloud storage', IS_LOCAL ? 'text-slate-500' : 'text-emerald-400'],
+          ['⏳', 'Phase 4', 'Claude AI Coach via Cloudflare Worker', 'text-slate-500'],
+        ].map(([icon, phase, desc, cls]) => `
+          <div class="flex items-start gap-3">
+            <span class="shrink-0 mt-0.5">${icon}</span>
+            <div>
+              <span class="text-xs font-semibold ${cls}">${phase}</span>
+              <span class="text-xs text-slate-400 ml-1.5">${desc}</span>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <div class="bg-amber-900/10 rounded-2xl p-4 border border-amber-500/20 space-y-2">
+      <p class="text-xs font-semibold text-amber-400">⚠️ Disclaimer</p>
+      <p class="text-xs text-slate-400 leading-relaxed">
+        This app is for educational purposes only. It is not a real brokerage account.
+        Real investments are managed by Arthy's parent through Dime.
+        Calculated values may differ from actual portfolio performance.
+        Prices are updated manually and do not reflect real-time market data (Phase 1).
+      </p>
+    </div>`;
+}
+
+// ── FORM: ADD / EDIT ───────────────────────────────────────
+
+function openAddForm() {
+  editingId = null;
+  document.getElementById('modal-title').textContent = 'Add Holding';
+  renderHoldingForm(null);
+  document.getElementById('modal-holding').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function openEditForm(id) {
+  editingId = id;
+  const h = portfolio.holdings.find(h => h.id === id);
+  if (!h) return;
+  document.getElementById('modal-title').textContent = `Edit ${h.symbol}`;
+  renderHoldingForm(h);
+  document.getElementById('modal-holding').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeModal() {
+  document.getElementById('modal-holding').classList.add('hidden');
+  document.body.style.overflow = '';
+  editingId = null;
+}
+
+function renderHoldingForm(h) {
+  h = h || {};
+  const isUS = (h.market || 'US') === 'US';
+
+  document.getElementById('holding-form').innerHTML = `
+    <div class="space-y-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Basic Info</p>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Ticker Symbol *</label>
+          <input type="text" id="f-symbol" value="${h.symbol || ''}" placeholder="VOO / AAPL"
+            class="input uppercase" oninput="this.value=this.value.toUpperCase()">
+        </div>
+        <div>
+          <label class="label">Market</label>
+          <select id="f-market" class="input" onchange="onMarketChange()">
+            <option value="US" ${(h.market||'US')==='US'?'selected':''}>🇺🇸 US</option>
+            <option value="TH" ${h.market==='TH'?'selected':''}>🇹🇭 TH</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="label">Full Name *</label>
+        <input type="text" id="f-name" value="${escHtml(h.name||'')}" placeholder="e.g. Vanguard S&P 500 ETF" class="input">
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Asset Type</label>
+          <select id="f-assetType" class="input">
+            ${ASSET_TYPES.map(t => `<option value="${t}" ${h.assetType===t?'selected':''}>${t}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="label">Risk Level</label>
+          <select id="f-riskLevel" class="input">
+            ${RISK_LEVELS.map(r => `<option value="${r}" ${h.riskLevel===r?'selected':''}>${r}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="label">Category</label>
+        <input type="text" id="f-category" value="${escHtml(h.category||'')}" placeholder="e.g. Core ETF, Individual Stock" list="cat-list" class="input">
+        <datalist id="cat-list">${CATEGORIES.map(c => `<option value="${c}">`).join('')}</datalist>
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Purchase Details</p>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Quantity *</label>
+          <input type="number" id="f-qty" value="${h.quantity||''}" placeholder="0.5" step="any" min="0" class="input" oninput="autoCalcCost()">
+        </div>
+        <div>
+          <label class="label">Avg Buy Price *</label>
+          <input type="number" id="f-buyPrice" value="${h.averageBuyPrice||''}" placeholder="450" step="any" min="0" class="input" oninput="autoCalcCost()">
+        </div>
+      </div>
+
+      <div id="fx-section" class="${isUS?'':'hidden'}">
+        <label class="label">Exchange Rate (1 USD = ? THB)</label>
+        <input type="number" id="f-fx" value="${h.fxRate||DEFAULT_FX}" placeholder="${DEFAULT_FX}" step="0.01" min="0" class="input" oninput="autoCalcCost()">
+        <p class="text-xs text-slate-500 mt-1">Use the rate at time of purchase, not today's rate.</p>
+      </div>
+
+      <div>
+        <label class="label">Total Cost (THB)</label>
+        <input type="number" id="f-cost" value="${h.totalCostTHB||''}" placeholder="Auto-calculated, or enter manually" step="any" min="0" class="input">
+        <p class="text-xs text-slate-500 mt-1">= Quantity × Price × FX Rate (can override)</p>
+      </div>
+
+      <div>
+        <label class="label">Buy Date</label>
+        <input type="date" id="f-date" value="${h.buyDate||''}" class="input">
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Current Price (Manual)</p>
+      <div>
+        <label class="label">Current Price *</label>
+        <input type="number" id="f-curPrice" value="${h.currentPrice||''}" placeholder="Latest price" step="any" min="0" class="input">
+        <p class="text-xs text-slate-500 mt-1" id="f-curPriceNote">
+          ${isUS ? 'Unit: USD' : 'Unit: THB'}
+        </p>
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">📓 Learning Journal</p>
+      <div class="bg-slate-700/30 rounded-2xl p-3.5 space-y-1.5">
+        <p class="text-xs text-slate-400 font-medium">💡 Answer these questions in your note:</p>
+        ${[
+          'Why did I buy this stock / ETF?',
+          'What does this company or ETF do? How does it make money?',
+          'What are the key risks?',
+          'What did I learn about it this month?',
+          'If I had to buy today, would I still buy it? Why?',
+        ].map(q => `<p class="text-xs text-slate-500">• ${q}</p>`).join('')}
+      </div>
+      <textarea id="f-note" rows="5" placeholder="Write your investment journal here…"
+        class="input resize-none leading-relaxed">${escHtml(h.learningNote||'')}</textarea>
+    </div>
+
+    <div class="flex gap-3 pt-1 pb-2">
+      <button type="button" onclick="closeModal()"
+        class="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3.5 rounded-2xl font-medium transition-colors active:scale-95">
+        Cancel
+      </button>
+      <button type="button" onclick="submitHoldingForm()"
+        class="flex-[2] bg-emerald-500 hover:bg-emerald-600 text-white py-3.5 rounded-2xl font-semibold transition-colors active:scale-95">
+        ${editingId ? 'Save Changes' : '+ Add to Portfolio'}
+      </button>
+    </div>`;
+}
+
+function onMarketChange() {
+  const isUS = document.getElementById('f-market').value === 'US';
+  document.getElementById('fx-section').classList.toggle('hidden', !isUS);
+  const note = document.getElementById('f-curPriceNote');
+  if (note) note.textContent = isUS ? 'Unit: USD' : 'Unit: THB';
+  autoCalcCost();
+}
+
+function autoCalcCost() {
+  const qty   = parseFloat(document.getElementById('f-qty')?.value)      || 0;
+  const price = parseFloat(document.getElementById('f-buyPrice')?.value)  || 0;
+  const isUS  = document.getElementById('f-market')?.value === 'US';
+  const fx    = isUS ? (parseFloat(document.getElementById('f-fx')?.value) || DEFAULT_FX) : 1;
+  if (qty > 0 && price > 0) {
+    const el = document.getElementById('f-cost');
+    if (el) el.value = (qty * price * fx).toFixed(2);
+  }
+}
+
+async function submitHoldingForm() {
+  const get = id => document.getElementById(id);
+  const symbol      = (get('f-symbol')?.value   || '').trim().toUpperCase();
+  const name        = (get('f-name')?.value      || '').trim();
+  const market      = get('f-market')?.value     || 'US';
+  const assetType   = get('f-assetType')?.value  || 'ETF';
+  const category    = (get('f-category')?.value  || '').trim() || 'General';
+  const riskLevel   = get('f-riskLevel')?.value  || 'Medium';
+  const quantity    = parseFloat(get('f-qty')?.value);
+  const avgPrice    = parseFloat(get('f-buyPrice')?.value);
+  const fxRate      = market === 'US' ? (parseFloat(get('f-fx')?.value) || DEFAULT_FX) : 1;
+  const costRaw     = parseFloat(get('f-cost')?.value);
+  const totalCostTHB = costRaw > 0 ? costRaw : quantity * avgPrice * fxRate;
+  const currentPrice = parseFloat(get('f-curPrice')?.value);
+  const buyDate     = get('f-date')?.value    || '';
+  const learningNote = (get('f-note')?.value   || '').trim();
+
+  if (!symbol)             return showToast('Symbol is required', 'error');
+  if (!name)               return showToast('Full name is required', 'error');
+  if (!(quantity > 0))     return showToast('Quantity must be greater than 0', 'error');
+  if (!(avgPrice > 0))     return showToast('Buy price must be greater than 0', 'error');
+  if (!(currentPrice > 0)) return showToast('Current price must be greater than 0', 'error');
+
+  const data = {
+    symbol, name, market, assetType, category, riskLevel, quantity,
+    averageBuyPrice: avgPrice,
+    buyCurrency    : market === 'US' ? 'USD' : 'THB',
+    fxRate, totalCostTHB, currentPrice,
+    currentPriceCurrency: market === 'US' ? 'USD' : 'THB',
+    buyDate, learningNote,
+  };
+
+  if (editingId) {
+    await updateHolding(editingId, data);
+    showToast(`${symbol} updated ✅`);
+  } else {
+    await addHolding(data);
+    showToast(`${symbol} added to portfolio 🎉`);
+  }
+
+  closeModal();
+  renderCurrentScreen();
+}
+
+// ── UPDATE PRICE QUICK MODAL ───────────────────────────────
+
+function openUpdatePriceModal(id) {
+  const h = portfolio.holdings.find(h => h.id === id);
+  if (!h) return;
+
+  const el = document.createElement('div');
+  el.id    = 'price-overlay';
+  el.className = 'fixed inset-0 z-50';
+  el.innerHTML = `
+    <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" onclick="closePriceOverlay()"></div>
+    <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-slate-900 rounded-t-3xl p-6 border-t border-slate-800">
+      <p class="text-base font-bold text-white mb-0.5">Update Price — ${h.symbol}</p>
+      <p class="text-xs text-slate-400 mb-5">Current: <span class="text-white">${h.currentPrice} ${h.currentPriceCurrency}</span></p>
+      <label class="text-sm text-slate-400 block mb-2">New Price (${h.currentPriceCurrency})</label>
+      <input type="number" id="new-price-input" value="${h.currentPrice}" step="any" min="0"
+        class="w-full bg-slate-700 border border-slate-600 rounded-2xl px-4 py-4 text-white text-2xl font-bold text-center focus:outline-none focus:border-emerald-500 mb-5">
+      <div class="grid grid-cols-2 gap-3">
+        <button onclick="closePriceOverlay()" class="bg-slate-700 text-white py-3.5 rounded-2xl font-medium active:scale-95">Cancel</button>
+        <button onclick="savePriceUpdate('${id}')" class="bg-emerald-500 hover:bg-emerald-600 text-white py-3.5 rounded-2xl font-semibold active:scale-95">Save</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(el);
+  setTimeout(() => document.getElementById('new-price-input')?.focus(), 80);
+}
+
+function closePriceOverlay() {
+  document.getElementById('price-overlay')?.remove();
+}
+
+async function savePriceUpdate(id) {
+  const val = parseFloat(document.getElementById('new-price-input')?.value);
+  if (!(val > 0)) return showToast('Please enter a valid price', 'error');
+
+  const h = portfolio.holdings.find(h => h.id === id);
+  if (!h) return;
+
+  await updateHolding(id, { currentPrice: val });
+  closePriceOverlay();
+  showToast(`${h.symbol} → ${val} ${h.currentPriceCurrency} ✅`);
+  renderCurrentScreen();
+}
+
+// ── CONFIRM DIALOGS ────────────────────────────────────────
+
+async function confirmDelete(id, symbol) {
+  if (confirm(`Remove ${symbol} from portfolio?\n\nThis will also delete the learning note. Cannot be undone.`)) {
+    await deleteHolding(id);
+    showToast(`${symbol} removed`);
+    renderCurrentScreen();
+  }
+}
+
+async function confirmClearAll() {
+  if (confirm('Delete ALL data?\n\nIncludes all holdings and learning notes.\nThis cannot be undone.\n\nConfirm?')) {
+    await clearAllData();
+  }
+}
+
+// ── EXPORT ─────────────────────────────────────────────────
+
+function exportData() {
+  const blob = new Blob([JSON.stringify(portfolio, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement('a'), {
+    href: url,
+    download: `arthy-portfolio-${new Date().toISOString().slice(0, 10)}.json`,
+  });
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Export complete 📁');
+}
+
+// ── UTILITIES ──────────────────────────────────────────────
+
+function fmt(amount) {
+  if (amount == null || isNaN(amount)) return '฿0';
+  return '฿' + Math.abs(amount).toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+let toastTimer = null;
+function showToast(msg, type = 'success') {
+  const wrap  = document.getElementById('toast');
+  const inner = document.getElementById('toast-inner');
+  if (!wrap || !inner) return;
+  inner.textContent = msg;
+  inner.className   = `text-sm rounded-2xl px-4 py-3 shadow-xl text-center border ${
+    type === 'error'
+      ? 'bg-red-900/90 text-red-200 border-red-700'
+      : type === 'info'
+        ? 'bg-blue-900/90 text-blue-200 border-blue-700'
+        : 'bg-slate-800 text-white border-slate-700'
+  }`;
+  wrap.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => wrap.classList.add('hidden'), 2600);
+}
+
+// ── INIT ───────────────────────────────────────────────────
+
+async function init() {
+  // Inject dynamic CSS for form inputs
+  const style = document.createElement('style');
+  style.textContent = `
+    .input {
+      width: 100%; background: rgb(51 65 85 / 0.6);
+      border: 1px solid rgb(71 85 105 / 0.8); border-radius: 0.75rem;
+      padding: 0.625rem 0.875rem; color: white; font-size: 0.875rem;
+      outline: none; transition: border-color 0.15s;
+    }
+    .input:focus { border-color: #10b981; }
+    .input option { background: #1e293b; color: white; }
+    .label { display: block; font-size: 0.75rem; color: rgb(148 163 184); margin-bottom: 0.25rem; }
+  `;
+  document.head.appendChild(style);
+
+  await loadPortfolio();
+  migrateData();
+  navigateTo('dashboard');
+}
+
+document.addEventListener('DOMContentLoaded', init);
