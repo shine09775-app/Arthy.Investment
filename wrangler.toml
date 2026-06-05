@@ -34,13 +34,13 @@ compatibility_date    = "2025-06-05"
 # ── Phase 2: KV cache for stock quotes ─────────────────────
 [[kv_namespaces]]
 binding = "QUOTE_CACHE"
-id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id      = "37892f6bf3794896ae79b47346fce57b"
 
 # ── Phase 3: D1 database for portfolio storage ─────────────
 [[d1_databases]]
 binding       = "DB"
 database_name = "arthy-portfolio"
-database_id   = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id   = "ca25226a-e8aa-43df-b252-6ae495c5cb34"
 
 # ── Optional non-secret vars ────────────────────────────────
 [vars]
