@@ -4,18 +4,22 @@
  * Phase 3 — Returns all holdings for the default portfolio from Cloudflare D1.
  * Falls back gracefully if DB binding is not configured.
  *
- * Required bindings in wrangler.toml / Pages dashboard:
- *   - D1 database : DB  (run schema.sql first)
- *
- * Deploy schema:
- *   wrangler d1 create arthy-portfolio
- *   wrangler d1 execute arthy-portfolio --file=schema.sql
+ * Auth: requires X-App-Secret header matching APP_SECRET env var.
  */
 
 const PORTFOLIO_ID = 'arthy-001';
 const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
 
-export async function onRequestGet({ env }) {
+function checkAuth(request, env) {
+  const secret = env.APP_SECRET;
+  if (!secret) return true; // Not configured → open (dev fallback)
+  return request.headers.get('X-App-Secret') === secret;
+}
+
+export async function onRequestGet({ request, env }) {
+  if (!checkAuth(request, env))
+    return json({ error: 'Unauthorized' }, 401);
+
   if (!env.DB) {
     return json({ holdings: [], lastUpdated: null, source: 'localstorage-fallback' }, 200);
   }
@@ -28,7 +32,8 @@ export async function onRequestGet({ env }) {
     const holdings = results.map(dbRowToHolding);
     return json({ holdings, lastUpdated: new Date().toISOString() }, 200);
   } catch (err) {
-    return json({ error: 'DB error', detail: err.message }, 500);
+    console.error('GET /api/portfolio DB error:', err.message);
+    return json({ error: 'Failed to load portfolio' }, 500);
   }
 }
 

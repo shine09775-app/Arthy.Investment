@@ -2,12 +2,22 @@
  * POST /api/holdings
  *
  * Phase 3 — Create a new holding in Cloudflare D1.
+ * Auth: requires X-App-Secret header matching APP_SECRET env var.
  */
 
 const PORTFOLIO_ID = 'arthy-001';
 const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
 
+function checkAuth(request, env) {
+  const secret = env.APP_SECRET;
+  if (!secret) return true;
+  return request.headers.get('X-App-Secret') === secret;
+}
+
 export async function onRequestPost({ request, env }) {
+  if (!checkAuth(request, env))
+    return json({ error: 'Unauthorized' }, 401);
+
   if (!env.DB) return json({ error: 'D1 not configured' }, 503);
 
   let body;
@@ -40,7 +50,8 @@ export async function onRequestPost({ request, env }) {
 
     return json({ success: true, id }, 201);
   } catch (err) {
-    return json({ error: 'DB insert failed', detail: err.message }, 500);
+    console.error('POST /api/holdings DB error:', err.message);
+    return json({ error: 'Failed to save holding' }, 500);
   }
 }
 

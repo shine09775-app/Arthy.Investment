@@ -3,11 +3,21 @@
  * DELETE /api/holdings/:id  — delete a holding
  *
  * Phase 3 — Cloudflare D1 via Pages Function.
+ * Auth: requires X-App-Secret header matching APP_SECRET env var.
  */
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
 
+function checkAuth(request, env) {
+  const secret = env.APP_SECRET;
+  if (!secret) return true;
+  return request.headers.get('X-App-Secret') === secret;
+}
+
 export async function onRequestPut({ request, params, env }) {
+  if (!checkAuth(request, env))
+    return json({ error: 'Unauthorized' }, 401);
+
   if (!env.DB) return json({ error: 'D1 not configured' }, 503);
 
   const { id } = params;
@@ -21,6 +31,10 @@ export async function onRequestPut({ request, params, env }) {
     buyDate, riskLevel, learningNote,
   } = body;
 
+  // Require the three identity fields — prevents D1_TYPE_ERROR on partial updates
+  if (!symbol || !market || !name)
+    return json({ error: 'symbol, market, name are required' }, 400);
+
   try {
     const result = await env.DB.prepare(`
       UPDATE holdings SET
@@ -32,11 +46,13 @@ export async function onRequestPut({ request, params, env }) {
       WHERE id = ?
     `).bind(
       symbol, market, name,
-      assetType || 'Stock', category || 'General',
-      quantity || 0, averageBuyPrice || 0,
-      buyCurrency || 'THB', fxRate || 1, totalCostTHB || 0,
-      currentPrice || 0, currentPriceCurrency || 'THB',
-      buyDate || null, riskLevel || 'Medium', learningNote || '',
+      assetType  || 'Stock',  category           || 'General',
+      quantity   || 0,        averageBuyPrice     || 0,
+      buyCurrency|| 'THB',    fxRate              || 1,
+      totalCostTHB || 0,      currentPrice        || 0,
+      currentPriceCurrency || 'THB',
+      buyDate    || null,     riskLevel           || 'Medium',
+      learningNote || '',
       id
     ).run();
 
@@ -45,11 +61,15 @@ export async function onRequestPut({ request, params, env }) {
 
     return json({ success: true, id }, 200);
   } catch (err) {
-    return json({ error: 'DB update failed', detail: err.message }, 500);
+    console.error('PUT /api/holdings/:id DB error:', err.message);
+    return json({ error: 'Failed to update holding' }, 500);
   }
 }
 
-export async function onRequestDelete({ params, env }) {
+export async function onRequestDelete({ request, params, env }) {
+  if (!checkAuth(request, env))
+    return json({ error: 'Unauthorized' }, 401);
+
   if (!env.DB) return json({ error: 'D1 not configured' }, 503);
 
   const { id } = params;
@@ -63,7 +83,8 @@ export async function onRequestDelete({ params, env }) {
 
     return json({ success: true }, 200);
   } catch (err) {
-    return json({ error: 'DB delete failed', detail: err.message }, 500);
+    console.error('DELETE /api/holdings/:id DB error:', err.message);
+    return json({ error: 'Failed to delete holding' }, 500);
   }
 }
 

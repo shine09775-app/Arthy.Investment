@@ -9,10 +9,15 @@
 
 // ── CONSTANTS ──────────────────────────────────────────────
 
-const APP_VERSION  = '2.0.0';
+const APP_VERSION  = '2.0.1';
 const STORAGE_KEY  = 'arthy_portfolio_v1';
 const DEFAULT_FX   = 36.5;          // THB per USD fallback
 const PORTFOLIO_ID = 'arthy-001';   // Fixed single-user ID for Phase 3
+
+// Shared API secret — sent in every request to the Functions backend.
+// Prevents casual public access. Anyone who can read this source code
+// could bypass it; for a single-user educational app this is sufficient.
+const APP_SECRET = 'arthy-2026-xK9mP3vQ7rL';
 
 const ASSET_TYPES = ['ETF', 'Stock', 'Bond', 'Crypto'];
 const RISK_LEVELS = ['Low', 'Medium', 'Medium-High', 'High'];
@@ -42,8 +47,14 @@ let editingId     = null;
 // When IS_LOCAL is false, the app uses these API calls.
 // Functions fall back to LocalStorage if the API is unreachable.
 
+// Common headers for all API calls
+const API_HEADERS = {
+  'Content-Type'  : 'application/json',
+  'X-App-Secret'  : APP_SECRET,
+};
+
 async function apiGetPortfolio() {
-  const res = await fetch('/api/portfolio');
+  const res = await fetch('/api/portfolio', { headers: API_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -51,7 +62,7 @@ async function apiGetPortfolio() {
 async function apiAddHolding(data) {
   const res = await fetch('/api/holdings', {
     method : 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: API_HEADERS,
     body   : JSON.stringify({ ...data, portfolioId: PORTFOLIO_ID }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -61,7 +72,7 @@ async function apiAddHolding(data) {
 async function apiUpdateHolding(id, data) {
   const res = await fetch(`/api/holdings/${id}`, {
     method : 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: API_HEADERS,
     body   : JSON.stringify(data),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -69,7 +80,10 @@ async function apiUpdateHolding(id, data) {
 }
 
 async function apiDeleteHolding(id) {
-  const res = await fetch(`/api/holdings/${id}`, { method: 'DELETE' });
+  const res = await fetch(`/api/holdings/${id}`, {
+    method : 'DELETE',
+    headers: API_HEADERS,
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
@@ -162,6 +176,7 @@ async function addHolding(data) {
   if (!IS_LOCAL) {
     try { await apiAddHolding(holding); } catch (e) {
       console.warn('API add failed (local copy saved):', e);
+      showToast('⚠️ Saved locally — cloud sync failed. Try reloading.', 'warning');
     }
   }
   return holding;
@@ -182,6 +197,7 @@ async function updateHolding(id, data) {
   if (!IS_LOCAL) {
     try { await apiUpdateHolding(id, portfolio.holdings[idx]); } catch (e) {
       console.warn('API update failed (local copy saved):', e);
+      showToast('⚠️ Saved locally — cloud sync failed. Try reloading.', 'warning');
     }
   }
   return portfolio.holdings[idx];
@@ -194,6 +210,7 @@ async function deleteHolding(id) {
   if (!IS_LOCAL) {
     try { await apiDeleteHolding(id); } catch (e) {
       console.warn('API delete failed (local copy saved):', e);
+      showToast('⚠️ Deleted locally — cloud sync failed. Try reloading.', 'warning');
     }
   }
 }
@@ -1256,9 +1273,11 @@ function showToast(msg, type = 'success') {
   inner.className   = `text-sm rounded-2xl px-4 py-3 shadow-xl text-center border ${
     type === 'error'
       ? 'bg-red-900/90 text-red-200 border-red-700'
-      : type === 'info'
-        ? 'bg-blue-900/90 text-blue-200 border-blue-700'
-        : 'bg-slate-800 text-white border-slate-700'
+      : type === 'warning'
+        ? 'bg-yellow-900/90 text-yellow-200 border-yellow-700'
+        : type === 'info'
+          ? 'bg-blue-900/90 text-blue-200 border-blue-700'
+          : 'bg-slate-800 text-white border-slate-700'
   }`;
   wrap.classList.remove('hidden');
   clearTimeout(toastTimer);
