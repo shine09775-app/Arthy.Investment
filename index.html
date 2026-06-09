@@ -74,6 +74,42 @@
         <div id="portfolio-list" class="space-y-3"></div>
       </div>
 
+      <!-- SCREEN: MARKETS (Market Watch + Price History) -->
+      <div id="screen-markets" class="screen hidden p-4 space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-xl font-bold text-white">📊 Market Watch</h2>
+            <p class="text-xs text-slate-400 mt-0.5">Track up to 10 stocks worldwide</p>
+          </div>
+          <button onclick="toggleWatchlistForm()"
+            class="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold px-4 py-2 rounded-full transition-colors active:scale-95"
+            id="btn-wl-add">+ Add</button>
+        </div>
+
+        <!-- Add form (hidden by default) -->
+        <div id="wl-form" class="hidden bg-slate-800/80 rounded-2xl p-4 border border-emerald-600/30 space-y-3">
+          <p class="text-sm font-semibold text-white">Add to Watchlist</p>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Display Name</label>
+            <input id="wl-name" type="text" maxlength="30" placeholder="e.g. Toyota Motor"
+              class="w-full bg-slate-700/60 border border-slate-600 rounded-xl px-3 py-2.5 text-white text-sm outline-none focus:border-emerald-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Yahoo Finance Symbol</label>
+            <input id="wl-symbol" type="text" maxlength="16" placeholder="AAPL · PTT.BK · 7203.T · 0700.HK"
+              class="w-full bg-slate-700/60 border border-slate-600 rounded-xl px-3 py-2.5 text-white text-sm font-mono outline-none focus:border-emerald-500" />
+            <p class="text-xs text-slate-500 mt-1">US: <span class="text-slate-300">AAPL</span> · TH: <span class="text-slate-300">PTT.BK</span> · JP: <span class="text-slate-300">7203.T</span> · HK: <span class="text-slate-300">0700.HK</span> · UK: <span class="text-slate-300">HSBA.L</span></p>
+          </div>
+          <div class="flex gap-2 pt-1">
+            <button onclick="toggleWatchlistForm()" class="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 py-2.5 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+            <button onclick="addToWatchlist()" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-xl text-sm font-semibold transition-colors active:scale-95">Add ✓</button>
+          </div>
+        </div>
+
+        <!-- Watchlist -->
+        <div id="watchlist-container" class="space-y-3"></div>
+      </div>
+
       <!-- SCREEN: COACH -->
       <div id="screen-coach" class="screen hidden p-4 space-y-4">
         <div>
@@ -125,12 +161,12 @@
         </button>
 
         <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
-          onclick="navigateTo('coach')" data-screen="coach">
+          onclick="navigateTo('markets')" data-screen="markets">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+              d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/>
           </svg>
-          <span class="text-xs">Coach</span>
+          <span class="text-xs">Markets</span>
         </button>
 
         <button class="nav-btn flex-1 flex flex-col items-center py-3 gap-0.5 text-slate-500 transition-colors active:scale-95"
@@ -158,6 +194,65 @@
         <!-- Modal Body (scrollable) -->
         <div class="overflow-y-auto flex-1">
           <form id="holding-form" class="p-5 space-y-6" onsubmit="return false;"></form>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── MODAL: PRICE HISTORY CHART ── -->
+    <div id="modal-history" class="fixed inset-0 z-50 hidden">
+      <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick="closeHistoryModal()"></div>
+      <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-slate-900 rounded-t-3xl max-h-[92vh] flex flex-col">
+        <!-- Header -->
+        <div class="flex items-start justify-between px-5 py-4 border-b border-slate-800 shrink-0">
+          <div>
+            <h3 id="hist-title" class="text-lg font-bold text-white"></h3>
+            <p id="hist-subtitle" class="text-xs text-slate-400 mt-0.5"></p>
+          </div>
+          <button onclick="closeHistoryModal()" class="w-8 h-8 flex items-center justify-center rounded-full bg-slate-800 text-slate-400 hover:text-white active:scale-95 shrink-0">✕</button>
+        </div>
+        <!-- Current price row -->
+        <div class="px-5 py-3 flex items-baseline gap-3 border-b border-slate-800/60 shrink-0">
+          <span id="hist-price" class="text-3xl font-bold text-white"></span>
+          <span id="hist-change" class="text-sm font-semibold"></span>
+        </div>
+        <!-- Period selector -->
+        <div class="px-5 py-3 flex gap-2 shrink-0 overflow-x-auto">
+          <button onclick="loadHistory('7d')"  data-period="7d"  class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-700 text-slate-300 transition-colors">7D</button>
+          <button onclick="loadHistory('1mo')" data-period="1mo" class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-600 text-white transition-colors">1M</button>
+          <button onclick="loadHistory('3mo')" data-period="3mo" class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-700 text-slate-300 transition-colors">3M</button>
+          <button onclick="loadHistory('6mo')" data-period="6mo" class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-700 text-slate-300 transition-colors">6M</button>
+          <button onclick="loadHistory('1y')"  data-period="1y"  class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-700 text-slate-300 transition-colors">1Y</button>
+          <button onclick="loadHistory('2y')"  data-period="2y"  class="hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-700 text-slate-300 transition-colors">2Y</button>
+        </div>
+        <!-- Chart area -->
+        <div class="flex-1 overflow-y-auto">
+          <div id="hist-chart-wrap" class="px-4 py-2">
+            <div id="hist-loading" class="flex items-center justify-center h-48 text-slate-500 text-sm">Loading chart…</div>
+            <svg id="hist-chart" class="w-full hidden" viewBox="0 0 400 160" preserveAspectRatio="none"></svg>
+          </div>
+          <!-- Stats -->
+          <div id="hist-stats" class="px-5 pb-6 grid grid-cols-2 gap-3 hidden">
+            <div class="bg-slate-800/60 rounded-xl p-3">
+              <p class="text-xs text-slate-400">Period High</p>
+              <p id="hist-high" class="text-base font-bold text-emerald-400 mt-0.5"></p>
+            </div>
+            <div class="bg-slate-800/60 rounded-xl p-3">
+              <p class="text-xs text-slate-400">Period Low</p>
+              <p id="hist-low" class="text-base font-bold text-red-400 mt-0.5"></p>
+            </div>
+            <div class="bg-slate-800/60 rounded-xl p-3">
+              <p class="text-xs text-slate-400">Period Start</p>
+              <p id="hist-start" class="text-base font-bold text-white mt-0.5"></p>
+            </div>
+            <div class="bg-slate-800/60 rounded-xl p-3">
+              <p class="text-xs text-slate-400">Period Change</p>
+              <p id="hist-period-chg" class="text-base font-bold mt-0.5"></p>
+            </div>
+            <div class="bg-slate-800/60 rounded-xl p-3 col-span-2">
+              <p class="text-xs text-slate-400 mb-1.5">Price History Table (last 10 days)</p>
+              <div id="hist-table" class="space-y-1 text-xs"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

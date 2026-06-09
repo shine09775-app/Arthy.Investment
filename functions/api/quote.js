@@ -36,14 +36,20 @@ export async function onRequestGet({ request, env }) {
   if (!checkAuth(request, env))
     return json({ error: 'Unauthorized' }, 401);
 
-  const url    = new URL(request.url);
-  const symbol = (url.searchParams.get('symbol') || '').toUpperCase().trim();
-  const market = (url.searchParams.get('market') || '').toUpperCase().trim();
+  const url         = new URL(request.url);
+  // yfSymbol param → worldwide stocks (7203.T, HSBA.L, 0700.HK etc.)
+  const yfSymbolParam = (url.searchParams.get('yfSymbol') || '').toUpperCase().trim();
+  const symbol = yfSymbolParam
+    ? yfSymbolParam
+    : (url.searchParams.get('symbol') || '').toUpperCase().trim();
+  const market = yfSymbolParam
+    ? 'WORLD'
+    : (url.searchParams.get('market') || '').toUpperCase().trim();
 
   if (!symbol || !SYMBOL_REGEX.test(symbol))
     return json({ error: 'Invalid or missing symbol' }, 400);
-  if (!['US', 'TH'].includes(market))
-    return json({ error: 'market must be US or TH' }, 400);
+  if (!yfSymbolParam && !['US', 'TH'].includes(market))
+    return json({ error: 'market must be US or TH (or use yfSymbol for worldwide)' }, 400);
 
   // ── KV cache check ────────────────────────────────────
   const cacheKey = `quote:${market}:${symbol}`;
@@ -80,7 +86,8 @@ export async function onRequestOptions() {
 // ── Yahoo Finance fetch ───────────────────────────────────
 
 function toYfSymbol(symbol, market) {
-  if (market === 'TH') return symbol + '.BK';
+  if (market === 'WORLD') return symbol;  // already full YF symbol (7203.T etc.)
+  if (market === 'TH')    return symbol + '.BK';
   return symbol;   // US: AAPL, VOO, QQQM — no suffix
 }
 

@@ -45,20 +45,28 @@ export async function onRequestGet({ request, env }) {
     return json({ error: 'Unauthorized' }, 401);
 
   const url    = new URL(request.url);
-  const symbol = (url.searchParams.get('symbol') || '').toUpperCase().trim();
-  const market = (url.searchParams.get('market') || 'US').toUpperCase().trim();
+  // yfSymbol param → use directly (worldwide stocks: 7203.T, HSBA.L, 0700.HK etc.)
+  // Otherwise: symbol + market → apply .BK mapping for TH
+  const yfSymbolParam = (url.searchParams.get('yfSymbol') || '').toUpperCase().trim();
+  const symbol = yfSymbolParam
+    ? yfSymbolParam
+    : (url.searchParams.get('symbol') || '').toUpperCase().trim();
+  const market = yfSymbolParam
+    ? (url.searchParams.get('market') || 'WORLD').toUpperCase().trim()
+    : (url.searchParams.get('market') || 'US').toUpperCase().trim();
   const period = url.searchParams.get('period') || '1mo';
   const start  = url.searchParams.get('start') || '';
   const end    = url.searchParams.get('end')   || '';
 
   if (!symbol || !SYMBOL_REGEX.test(symbol))
     return json({ error: 'Invalid or missing symbol' }, 400);
-  if (!['US', 'TH'].includes(market))
-    return json({ error: 'market must be US or TH' }, 400);
   if (!start && !VALID_PERIODS.has(period))
     return json({ error: `period must be one of: ${[...VALID_PERIODS].join(', ')}` }, 400);
 
-  const yfSymbol = market === 'TH' ? symbol + '.BK' : symbol;
+  // yfSymbol: direct (worldwide) | TH → .BK | US → as-is
+  const yfSymbol = yfSymbolParam
+    ? yfSymbolParam
+    : market === 'TH' ? symbol + '.BK' : symbol;
 
   // ── KV cache ──────────────────────────────────────────
   const cacheKey = start

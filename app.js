@@ -43,6 +43,11 @@ let portfolio     = { holdings: [], lastUpdated: null };
 let currentScreen = 'dashboard';
 let editingId     = null;
 
+// Watchlist state (Market Watch screen)
+// [{name, yfSymbol, addedAt}]  — max 10 items
+let watchlist     = [];
+let historyCtx    = null;   // {name, yfSymbol} currently open in history modal
+
 // ── PHASE 3: API STORAGE LAYER ─────────────────────────────
 // When IS_LOCAL is false, the app uses these API calls.
 // Functions fall back to LocalStorage if the API is unreachable.
@@ -574,6 +579,380 @@ async function loadSyncStatus() {
   } catch (_) { return null; }
 }
 
+// ═══════════════════════════════════════════════════════════
+// ── MARKET WATCH / WATCHLIST ─────────────────────────────
+// ═══════════════════════════════════════════════════════════
+
+const WL_KEY     = 'arthy_watchlist_v1';
+const WL_MAX     = 10;
+
+function loadWatchlistState() {
+  try {
+    const raw = localStorage.getItem(WL_KEY);
+    if (raw) watchlist = JSON.parse(raw);
+  } catch (_) { watchlist = []; }
+}
+
+function saveWatchlistState() {
+  try { localStorage.setItem(WL_KEY, JSON.stringify(watchlist)); } catch (_) {}
+}
+
+function toggleWatchlistForm() {
+  const form = document.getElementById('wl-form');
+  if (!form) return;
+  const isHidden = form.classList.contains('hidden');
+  form.classList.toggle('hidden', !isHidden);
+  if (isHidden) document.getElementById('wl-name')?.focus();
+}
+
+function addToWatchlist() {
+  const name   = document.getElementById('wl-name')?.value.trim();
+  const symbol = document.getElementById('wl-symbol')?.value.trim().toUpperCase();
+
+  if (!name)   { showToast('Enter a display name', 'error'); return; }
+  if (!symbol) { showToast('Enter a Yahoo Finance symbol', 'error'); return; }
+  if (watchlist.length >= WL_MAX) {
+    showToast(`Maximum ${WL_MAX} stocks in watchlist`, 'error'); return;
+  }
+  if (watchlist.find(w => w.yfSymbol === symbol)) {
+    showToast(`${symbol} already in watchlist`, 'warning'); return;
+  }
+
+  watchlist.push({ name, yfSymbol: symbol, addedAt: new Date().toISOString() });
+  saveWatchlistState();
+
+  // Clear inputs
+  document.getElementById('wl-name').value   = '';
+  document.getElementById('wl-symbol').value = '';
+  toggleWatchlistForm();
+
+  renderMarkets();
+  showToast(`${name} added to watchlist ✅`);
+}
+
+function removeFromWatchlist(yfSymbol) {
+  watchlist = watchlist.filter(w => w.yfSymbol !== yfSymbol);
+  saveWatchlistState();
+  renderMarkets();
+}
+
+// ── Render Market Watch screen ────────────────────────────
+
+function renderMarkets() {
+  const container = document.getElementById('watchlist-container');
+  if (!container) return;
+
+  if (watchlist.length === 0) {
+    container.innerHTML = `
+      <div class="bg-slate-800/60 rounded-2xl p-8 text-center border border-slate-700/40">
+        <div class="text-4xl mb-3">🌍</div>
+        <p class="text-white font-semibold">No stocks yet</p>
+        <p class="text-xs text-slate-400 mt-1">Tap <strong>+ Add</strong> and enter any Yahoo Finance symbol</p>
+        <div class="mt-4 text-xs text-slate-500 space-y-1 text-left max-w-xs mx-auto">
+          <p>🇺🇸 US stocks: <span class="text-slate-300 font-mono">AAPL · TSLA · VOO</span></p>
+          <p>🇹🇭 Thai stocks: <span class="text-slate-300 font-mono">PTT.BK · ADVANC.BK</span></p>
+          <p>🇯🇵 Japan: <span class="text-slate-300 font-mono">7203.T · 6758.T</span></p>
+          <p>🇭🇰 Hong Kong: <span class="text-slate-300 font-mono">0700.HK · 9988.HK</span></p>
+          <p>🇬🇧 UK: <span class="text-slate-300 font-mono">HSBA.L · SHEL.L</span></p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = watchlist.map(w => `
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60" id="wl-card-${CSS.escape(w.yfSymbol)}">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <p class="text-base font-bold text-white truncate">${escHtml(w.name)}</p>
+          <p class="text-xs font-mono text-slate-400">${escHtml(w.yfSymbol)}</p>
+        </div>
+        <button onclick="removeFromWatchlist('${escHtml(w.yfSymbol)}')"
+          class="shrink-0 w-7 h-7 flex items-center justify-center text-slate-500 hover:text-red-400 rounded-full hover:bg-red-900/20 transition-colors text-lg leading-none">×</button>
+      </div>
+      <!-- Price row (filled async) -->
+      <div id="wl-price-${CSS.escape(w.yfSymbol)}" class="mt-2 flex items-center justify-between">
+        <span class="text-xs text-slate-500 animate-pulse">fetching price…</span>
+      </div>
+      <!-- Buttons -->
+      <div class="mt-3 flex gap-2">
+        <button onclick="openHistoryModal('${escHtml(w.name)}', '${escHtml(w.yfSymbol)}')"
+          class="flex-1 flex items-center justify-center gap-1.5 bg-emerald-700/30 hover:bg-emerald-700/50 border border-emerald-600/30 rounded-xl py-2 text-xs font-semibold text-emerald-400 transition-colors active:scale-95">
+          📈 Price History
+        </button>
+      </div>
+    </div>`).join('');
+
+  // Fetch prices async for each watchlist item
+  if (!IS_LOCAL) {
+    watchlist.forEach(w => fetchWatchlistQuote(w));
+  }
+}
+
+async function fetchWatchlistQuote(w) {
+  const el = document.getElementById(`wl-price-${CSS.escape(w.yfSymbol)}`);
+  if (!el) return;
+
+  try {
+    const res  = await fetch(`/api/quote?yfSymbol=${encodeURIComponent(w.yfSymbol)}`, { headers: API_HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const q = await res.json();
+
+    if (q.error) throw new Error(q.error);
+
+    const isPos  = (q.changePercent ?? 0) >= 0;
+    const chgCls = isPos ? 'text-emerald-400' : 'text-red-400';
+    const chgStr = (isPos ? '+' : '') + (q.changePercent ?? 0).toFixed(2) + '%';
+    const arrow  = isPos ? '▲' : '▼';
+    const priceFmt = q.price?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '—';
+
+    el.innerHTML = `
+      <div class="flex items-baseline gap-2">
+        <span class="text-xl font-bold text-white">${priceFmt}</span>
+        <span class="text-xs text-slate-400">${escHtml(q.currency ?? '')}</span>
+      </div>
+      <div class="text-right">
+        <span class="text-sm font-semibold ${chgCls}">${arrow} ${chgStr}</span>
+        <p class="text-xs text-slate-500">${escHtml(q.exchangeName ?? '')}</p>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<span class="text-xs text-red-400">⚠️ ${escHtml(e.message)}</span>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ── PRICE HISTORY MODAL ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+
+function openHistoryModal(name, yfSymbol) {
+  historyCtx = { name, yfSymbol };
+
+  document.getElementById('hist-title').textContent    = name;
+  document.getElementById('hist-subtitle').textContent = yfSymbol;
+  document.getElementById('hist-price').textContent    = '—';
+  document.getElementById('hist-change').textContent   = '';
+  document.getElementById('hist-chart').classList.add('hidden');
+  document.getElementById('hist-stats').classList.add('hidden');
+  document.getElementById('hist-loading').textContent  = 'Loading chart…';
+  document.getElementById('hist-loading').classList.remove('hidden');
+
+  // Reset period buttons
+  document.querySelectorAll('.hist-period-btn').forEach(b => {
+    const active = b.dataset.period === '1mo';
+    b.className = `hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+      active ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`;
+  });
+
+  document.getElementById('modal-history').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+
+  // Fetch current quote + 1mo history
+  fetchHistoryQuote(yfSymbol);
+  loadHistory('1mo');
+}
+
+function closeHistoryModal() {
+  document.getElementById('modal-history').classList.add('hidden');
+  document.body.style.overflow = '';
+  historyCtx = null;
+}
+
+async function fetchHistoryQuote(yfSymbol) {
+  try {
+    const res = await fetch(`/api/quote?yfSymbol=${encodeURIComponent(yfSymbol)}`, { headers: API_HEADERS });
+    if (!res.ok) return;
+    const q = await res.json();
+    if (q.error) return;
+
+    const isPos  = (q.changePercent ?? 0) >= 0;
+    const chgCls = isPos ? 'text-emerald-400' : 'text-red-400';
+    const chgStr = (isPos ? '+' : '') + (q.changePercent ?? 0).toFixed(2) + '%  (' +
+      (isPos ? '+' : '') + (q.change ?? 0).toFixed(2) + ')';
+
+    const priceEl  = document.getElementById('hist-price');
+    const changeEl = document.getElementById('hist-change');
+    if (priceEl)  priceEl.textContent = (q.price ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (q.currency ?? '');
+    if (changeEl) { changeEl.textContent = chgStr; changeEl.className = `text-sm font-semibold ${chgCls}`; }
+
+    const subtitleEl = document.getElementById('hist-subtitle');
+    if (subtitleEl && q.exchangeName) subtitleEl.textContent = `${yfSymbol} · ${q.exchangeName}`;
+  } catch (_) {}
+}
+
+async function loadHistory(period) {
+  if (!historyCtx) return;
+  const { name, yfSymbol } = historyCtx;
+
+  // Update active period button
+  document.querySelectorAll('.hist-period-btn').forEach(b => {
+    const active = b.dataset.period === period;
+    b.className = `hist-period-btn px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+      active ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'}`;
+  });
+
+  // Show loading
+  const loadingEl = document.getElementById('hist-loading');
+  const chartEl   = document.getElementById('hist-chart');
+  const statsEl   = document.getElementById('hist-stats');
+  loadingEl.textContent = 'Loading chart…';
+  loadingEl.classList.remove('hidden');
+  chartEl.classList.add('hidden');
+  statsEl.classList.add('hidden');
+
+  try {
+    const url = IS_LOCAL
+      ? null
+      : `/api/history?yfSymbol=${encodeURIComponent(yfSymbol)}&period=${period}`;
+
+    if (!url) {
+      loadingEl.textContent = 'Charts require Cloudflare deployment';
+      return;
+    }
+
+    const res  = await fetch(url, { headers: API_HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    const rows = data.rows || [];
+    if (rows.length < 2) { loadingEl.textContent = 'Not enough data for this period'; return; }
+
+    drawHistoryChart(rows, data.currency ?? '');
+    renderHistoryStats(rows, data.currency ?? '');
+
+    loadingEl.classList.add('hidden');
+    chartEl.classList.remove('hidden');
+    statsEl.classList.remove('hidden');
+
+  } catch (err) {
+    loadingEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+// ── SVG Line Chart ────────────────────────────────────────
+
+function drawHistoryChart(rows, currency) {
+  const svg   = document.getElementById('hist-chart');
+  if (!svg) return;
+
+  const W = 400, H = 160;
+  const padL = 8, padR = 8, padT = 10, padB = 20;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const closes = rows.map(r => r.close).filter(v => v !== null);
+  const minP   = Math.min(...closes);
+  const maxP   = Math.max(...closes);
+  const range  = maxP - minP || 1;
+
+  const isUp = closes[closes.length - 1] >= closes[0];
+  const color = isUp ? '#10b981' : '#ef4444';   // emerald / red
+
+  // Scale helpers
+  const sx = i  => padL + (i  / (rows.length - 1)) * plotW;
+  const sy = p  => padT + ((maxP - p) / range) * plotH;
+
+  // Build polyline points
+  const pts = rows
+    .filter(r => r.close !== null)
+    .map((r, i) => `${sx(i)},${sy(r.close)}`)
+    .join(' ');
+
+  // Build area path (close it back to bottom)
+  const firstX = sx(0);
+  const lastX  = sx(rows.filter(r => r.close !== null).length - 1);
+  const botY   = padT + plotH;
+  const areaPath = `M ${firstX},${botY} L ${pts.split(' ').map((p, i) =>
+    i === 0 ? `${firstX},${sy(rows.find(r => r.close !== null)?.close ?? minP)}` : p
+  ).join(' L ')} L ${lastX},${botY} Z`;
+
+  // Last point dot
+  const lastRow = rows.filter(r => r.close !== null).at(-1);
+  const dotX    = sx(rows.filter(r => r.close !== null).length - 1);
+  const dotY    = sy(lastRow?.close ?? closes.at(-1));
+
+  // X-axis labels (first + last date)
+  const firstDate = rows[0]?.date?.slice(5) ?? '';
+  const lastDate  = rows.at(-1)?.date?.slice(5) ?? '';
+
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="${color}" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0.02"/>
+      </linearGradient>
+    </defs>
+
+    <!-- Area fill -->
+    <path d="${buildAreaPath(rows, sx, sy, padT, plotH)}" fill="url(#chartFill)" />
+
+    <!-- Line -->
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+
+    <!-- Last price dot -->
+    <circle cx="${dotX}" cy="${dotY}" r="4" fill="${color}" stroke="#0f172a" stroke-width="2"/>
+
+    <!-- X-axis labels -->
+    <text x="${padL}" y="${H - 3}" font-size="9" fill="#64748b">${escHtml(firstDate)}</text>
+    <text x="${W - padR}" y="${H - 3}" font-size="9" fill="#64748b" text-anchor="end">${escHtml(lastDate)}</text>
+
+    <!-- Y-axis labels -->
+    <text x="${padL + 2}" y="${padT + 8}" font-size="9" fill="#64748b">${fmtChartPrice(maxP, currency)}</text>
+    <text x="${padL + 2}" y="${padT + plotH - 2}" font-size="9" fill="#64748b">${fmtChartPrice(minP, currency)}</text>`;
+}
+
+function buildAreaPath(rows, sx, sy, padT, plotH) {
+  const filtered = rows.filter(r => r.close !== null);
+  if (!filtered.length) return '';
+  const botY  = padT + plotH;
+  const start = `M ${sx(0)},${botY}`;
+  const line  = filtered.map((r, i) => `L ${sx(i)},${sy(r.close)}`).join(' ');
+  const end   = `L ${sx(filtered.length - 1)},${botY} Z`;
+  return `${start} ${line} ${end}`;
+}
+
+function fmtChartPrice(p, currency) {
+  if (p >= 1000) return (p / 1000).toFixed(1) + 'K';
+  return p.toFixed(p < 10 ? 2 : 0);
+}
+
+// ── History stats (below the chart) ──────────────────────
+
+function renderHistoryStats(rows, currency) {
+  const closes  = rows.map(r => r.close).filter(v => v !== null);
+  const highs   = rows.map(r => r.high).filter(v => v !== null);
+  const lows    = rows.map(r => r.low).filter(v => v !== null);
+  const maxH    = Math.max(...highs);
+  const minL    = Math.min(...lows);
+  const first   = closes[0];
+  const last    = closes.at(-1);
+  const pChg    = first > 0 ? ((last - first) / first * 100) : 0;
+  const isPos   = pChg >= 0;
+  const pChgStr = (isPos ? '+' : '') + pChg.toFixed(2) + '%';
+
+  const fmt = v => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  document.getElementById('hist-high').textContent        = fmt(maxH) + ' ' + currency;
+  document.getElementById('hist-low').textContent         = fmt(minL) + ' ' + currency;
+  document.getElementById('hist-start').textContent       = fmt(first) + ' ' + currency;
+  const pChgEl = document.getElementById('hist-period-chg');
+  pChgEl.textContent  = pChgStr;
+  pChgEl.className    = `text-base font-bold mt-0.5 ${isPos ? 'text-emerald-400' : 'text-red-400'}`;
+
+  // Last 10 rows table
+  const tableEl = document.getElementById('hist-table');
+  const last10  = rows.filter(r => r.close !== null).slice(-10).reverse();
+  tableEl.innerHTML = last10.map(r => {
+    const chg  = r.close - r.open;
+    const up   = chg >= 0;
+    return `<div class="flex justify-between items-center py-0.5 border-b border-slate-700/30">
+      <span class="text-slate-400 w-20">${r.date}</span>
+      <span class="text-slate-300 font-mono">${fmt(r.close)}</span>
+      <span class="${up ? 'text-emerald-400' : 'text-red-400'} font-mono w-14 text-right">${(up ? '+' : '') + chg.toFixed(2)}</span>
+      <span class="text-slate-500 text-right w-16">${(r.volume / 1e6).toFixed(1)}M</span>
+    </div>`;
+  }).join('');
+}
+
 // ── DEMO DATA ──────────────────────────────────────────────
 
 async function loadDemoData() {
@@ -659,6 +1038,7 @@ function navigateTo(screen) {
 function renderCurrentScreen() {
   if      (currentScreen === 'dashboard') renderDashboard();
   else if (currentScreen === 'portfolio') renderPortfolio();
+  else if (currentScreen === 'markets')   renderMarkets();
   else if (currentScreen === 'coach')     renderCoach();
   else if (currentScreen === 'settings')  renderSettings();
 }
@@ -1064,39 +1444,30 @@ function renderSettings() {
       </div>
     </div>
 
-    <!-- ── Other data management ──────────────────────── -->
+    <!-- ── Data management (export only) ───────────────── -->
     <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
       <p class="text-sm font-semibold text-white mb-3">Data Management</p>
       <div class="space-y-2">
-
-        <button onclick="loadDemoData()"
-          class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left">
-          <span class="text-2xl shrink-0">🎯</span>
-          <div>
-            <p class="text-sm font-medium text-white">Load Sample Data</p>
-            <p class="text-xs text-slate-400">VOO, QQQM, AAPL, ADVANC, CPALL</p>
-          </div>
-        </button>
 
         <button onclick="exportData()"
           class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left">
           <span class="text-2xl shrink-0">📤</span>
           <div>
             <p class="text-sm font-medium text-white">Export Data (JSON)</p>
-            <p class="text-xs text-slate-400">Save portfolio to a file</p>
-          </div>
-        </button>
-
-        <button onclick="confirmClearAll()"
-          class="w-full flex items-center gap-3 bg-red-900/20 hover:bg-red-900/30 rounded-2xl p-3.5 transition-colors active:scale-95 text-left border border-red-500/20">
-          <span class="text-2xl shrink-0">🗑️</span>
-          <div>
-            <p class="text-sm font-medium text-red-400">Clear All Data</p>
-            <p class="text-xs text-red-400/60">Includes all learning notes — cannot be undone</p>
+            <p class="text-xs text-slate-400">Save portfolio backup to a file</p>
           </div>
         </button>
 
       </div>
+    </div>
+
+    <!-- ── AI Coach (moved from nav) ────────────────────── -->
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-sm font-semibold text-white">🤖 Portfolio Coach</p>
+        <button onclick="navigateTo('coach')" class="text-xs text-emerald-400 hover:text-emerald-300">Full Analysis →</button>
+      </div>
+      <div id="settings-coach-mini" class="text-xs text-slate-400">Loading analysis…</div>
     </div>
 
     <!-- ── Road map ───────────────────────────────────── -->
@@ -1136,6 +1507,34 @@ function renderSettings() {
   // Fill from cached refresh log immediately, then fetch fresh status
   if (lastRefreshLog) renderRefreshLog(lastRefreshLog);
   if (!IS_LOCAL) loadAndRenderCloudStatus();
+
+  // Mini coach summary in settings
+  renderSettingsCoachMini();
+}
+
+function renderSettingsCoachMini() {
+  const el = document.getElementById('settings-coach-mini');
+  if (!el) return;
+  const m = calcPortfolio();
+  if (!m.holdings.length) {
+    el.innerHTML = '<p class="text-slate-500">No holdings yet — add stocks to get analysis.</p>';
+    return;
+  }
+  const summary  = generateCoachSummary();
+  const score    = summary.healthScore;
+  const warnings = checkRules(m);
+  const scoreColor = score >= 70 ? 'text-emerald-400' : score >= 40 ? 'text-yellow-400' : 'text-red-400';
+  el.innerHTML = `
+    <div class="flex items-center gap-3 mb-2">
+      <div class="text-2xl font-bold ${scoreColor}">${score}<span class="text-sm font-normal text-slate-500">/100</span></div>
+      <div>
+        <p class="text-white font-medium text-xs">Health Score</p>
+        <p class="text-slate-500 text-xs">${score >= 70 ? 'Good diversification' : score >= 40 ? 'Some risks' : 'Needs attention'}</p>
+      </div>
+    </div>
+    ${warnings.length > 0
+      ? `<p class="text-yellow-400 text-xs">⚠️ ${warnings.length} warning${warnings.length > 1 ? 's' : ''} — tap Full Analysis</p>`
+      : `<p class="text-emerald-400 text-xs">✅ No warnings — portfolio looks healthy</p>`}`;
 }
 
 // Fill the Cloud Data card from /api/sync-status
@@ -1572,7 +1971,8 @@ async function init() {
   `;
   document.head.appendChild(style);
 
-  loadLastRefreshLog();   // restore last refresh log from LocalStorage cache
+  loadLastRefreshLog();    // restore last refresh log from LocalStorage cache
+  loadWatchlistState();    // restore watchlist from LocalStorage
   await loadPortfolio();
   migrateData();
   navigateTo('dashboard');
