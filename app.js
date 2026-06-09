@@ -39,9 +39,10 @@ const IS_LOCAL = (() => {
 
 // ── STATE ──────────────────────────────────────────────────
 
-let portfolio     = { holdings: [], lastUpdated: null };
-let currentScreen = 'dashboard';
-let editingId     = null;
+let portfolio      = { holdings: [], lastUpdated: null };
+let currentScreen  = 'dashboard';
+let editingId      = null;
+let currentFXRate  = DEFAULT_FX;   // live USD/THB rate — updated from /api/fx on init
 
 // Watchlist state (Market Watch screen)
 // [{name, yfSymbol, addedAt}]  — max 10 items
@@ -223,20 +224,47 @@ async function deleteHolding(id) {
 // ── CALCULATIONS ───────────────────────────────────────────
 
 function calcHolding(h) {
-  const cpFx = h.currentPriceCurrency === 'USD' ? (h.fxRate || DEFAULT_FX) : 1;
-  const currentValueTHB = h.quantity * h.currentPrice * cpFx;
+  const isUSstock = h.market === 'US' && h.buyCurrency === 'USD'
+                 && h.currentPriceCurrency === 'USD';
 
-  const buyFx = h.buyCurrency === 'USD' ? (h.fxRate || DEFAULT_FX) : 1;
+  // Current value: use live FX rate for US stocks
+  const curFX          = h.currentPriceCurrency === 'USD' ? currentFXRate : 1;
+  const currentValueTHB = h.quantity * h.currentPrice * curFX;
+
+  // Cost basis: use the stored FX rate at time of purchase
+  const buyFX       = h.buyCurrency === 'USD' ? (h.fxRate || DEFAULT_FX) : 1;
   const totalCostTHB = h.totalCostTHB > 0
     ? h.totalCostTHB
-    : h.quantity * h.averageBuyPrice * buyFx;
+    : h.quantity * h.averageBuyPrice * buyFX;
 
   const gainLossTHB     = currentValueTHB - totalCostTHB;
-  const gainLossPercent = totalCostTHB > 0
-    ? (gainLossTHB / totalCostTHB) * 100
-    : 0;
+  const gainLossPercent = totalCostTHB > 0 ? (gainLossTHB / totalCostTHB) * 100 : 0;
 
-  return { ...h, currentValueTHB, totalCostTHB, gainLossTHB, gainLossPercent };
+  // ── P&L breakdown for US stocks ─────────────────────────
+  // stockPnLTHB: gain/loss purely from price change (valued at buy FX rate)
+  // fxPnLTHB:   gain/loss from USD/THB rate movement
+  // stockPnLTHB + fxPnLTHB = gainLossTHB  ✓
+  let stockPnLTHB = gainLossTHB;
+  let stockPnLUSD = 0;
+  let fxPnLTHB    = 0;
+  let fxChange    = 0;   // current FX - buy FX
+
+  if (isUSstock) {
+    stockPnLUSD = (h.currentPrice - h.averageBuyPrice) * h.quantity;
+    stockPnLTHB = stockPnLUSD * buyFX;
+    fxChange    = currentFXRate - buyFX;
+    fxPnLTHB   = h.currentPrice * h.quantity * fxChange;
+  }
+
+  return {
+    ...h,
+    currentValueTHB, totalCostTHB,
+    gainLossTHB, gainLossPercent,
+    stockPnLTHB, stockPnLUSD,
+    fxPnLTHB, fxChange,
+    buyFX, curFX,
+    isUSstock,
+  };
 }
 
 function calcPortfolio() {
@@ -567,6 +595,33 @@ async function refreshAllPrices(force = false) {
   } finally {
     if (btn) { btn.disabled = false; btn.classList.remove('animate-spin-once'); }
   }
+}
+
+// Fetch live USD/THB FX rate from /api/fx and update currentFXRate
+async function fetchLiveFXRate() {
+  if (IS_LOCAL) return currentFXRate;
+  try {
+    const res = await fetch('/api/fx?pair=USDTHB', { headers: API_HEADERS });
+    if (!res.ok) return currentFXRate;
+    const data = await res.json();
+    if (data.rate && data.rate > 0) {
+      currentFXRate = data.rate;
+      // Persist so next open shows last known rate
+      try { localStorage.setItem('arthy_fx_rate', JSON.stringify({ rate: data.rate, updatedAt: data.updatedAt })); } catch (_) {}
+    }
+    return currentFXRate;
+  } catch (_) { return currentFXRate; }
+}
+
+// Restore last known FX rate from LocalStorage (instant on startup)
+function loadFXRateCache() {
+  try {
+    const raw = localStorage.getItem('arthy_fx_rate');
+    if (raw) {
+      const { rate } = JSON.parse(raw);
+      if (rate > 0) currentFXRate = rate;
+    }
+  } catch (_) {}
 }
 
 // Load cloud sync status (D1 count + last refresh log from KV)
@@ -1237,6 +1292,25 @@ function renderPortfolio() {
             <span>Avg buy: ${h.averageBuyPrice} ${h.buyCurrency}</span>
           </div>
 
+          ${h.isUSstock ? `
+          <div class="bg-slate-900/60 rounded-xl p-3 space-y-1.5 border border-slate-700/40">
+            <p class="text-xs font-semibold text-slate-400">P&L Breakdown</p>
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-400">📈 Stock price</span>
+              <span class="${h.stockPnLTHB >= 0 ? 'text-emerald-400' : 'text-red-400'} font-semibold">
+                ${h.stockPnLTHB >= 0 ? '+' : ''}${fmt(h.stockPnLTHB)}
+                <span class="text-slate-500 font-normal ml-1">(${h.stockPnLUSD >= 0 ? '+' : ''}$${h.stockPnLUSD.toFixed(2)})</span>
+              </span>
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-400">💱 FX rate</span>
+              <span class="${h.fxPnLTHB >= 0 ? 'text-emerald-400' : 'text-red-400'} font-semibold">
+                ${h.fxPnLTHB >= 0 ? '+' : ''}${fmt(h.fxPnLTHB)}
+                <span class="text-slate-500 font-normal ml-1">(${h.buyFX.toFixed(2)} → ${h.curFX.toFixed(2)} ฿/$)</span>
+              </span>
+            </div>
+          </div>` : ''}
+
           ${hasNote ? `
           <div class="bg-slate-900/60 rounded-xl p-3 border-l-2 border-emerald-500/50">
             <p class="text-xs text-emerald-400 font-medium mb-0.5">📓 Learning Note</p>
@@ -1724,15 +1798,31 @@ function renderHoldingForm(h) {
       </div>
 
       <div id="fx-section" class="${isUS?'':'hidden'}">
-        <label class="label">Exchange Rate (1 USD = ? THB)</label>
-        <input type="number" id="f-fx" value="${h.fxRate||DEFAULT_FX}" placeholder="${DEFAULT_FX}" step="0.01" min="0" class="input" oninput="autoCalcCost()">
-        <p class="text-xs text-slate-500 mt-1">Use the rate at time of purchase, not today's rate.</p>
+        <div class="flex items-center justify-between mb-1">
+          <label class="label" style="margin-bottom:0">Exchange Rate (1 USD = ? THB)</label>
+          <button type="button" id="btn-live-fx" onclick="fetchAndFillLiveFX()"
+            class="text-xs text-emerald-400 hover:text-emerald-300 active:scale-95 transition-all flex items-center gap-1">
+            <span id="live-fx-spinner">🔄</span> Live Rate
+          </button>
+        </div>
+        <input type="number" id="f-fx"
+          value="${h.fxRate || currentFXRate}"
+          placeholder="${currentFXRate}"
+          step="0.01" min="0" class="input"
+          oninput="onFXChange()">
+        <p class="text-xs text-slate-500 mt-1" id="fx-hint">
+          Rate at time of purchase · Live: <span id="fx-live-label">${currentFXRate.toFixed(4)}</span> THB/USD
+        </p>
       </div>
 
       <div>
         <label class="label">Total Cost (THB)</label>
-        <input type="number" id="f-cost" value="${h.totalCostTHB||''}" placeholder="Auto-calculated, or enter manually" step="any" min="0" class="input">
-        <p class="text-xs text-slate-500 mt-1">= Quantity × Price × FX Rate (can override)</p>
+        <input type="number" id="f-cost"
+          value="${h.totalCostTHB||''}"
+          placeholder="Auto-calculated — or edit to back-calc FX rate"
+          step="any" min="0" class="input"
+          oninput="onCostChange()">
+        <p class="text-xs text-slate-500 mt-1">= Qty × Price × FX Rate · editing either field updates the other</p>
       </div>
 
       <div>
@@ -1785,18 +1875,63 @@ function onMarketChange() {
   document.getElementById('fx-section').classList.toggle('hidden', !isUS);
   const note = document.getElementById('f-curPriceNote');
   if (note) note.textContent = isUS ? 'Unit: USD' : 'Unit: THB';
-  autoCalcCost();
+  // Pre-fill with latest known FX rate when switching to US
+  if (isUS) {
+    const fxEl = document.getElementById('f-fx');
+    if (fxEl && (!fxEl.value || parseFloat(fxEl.value) === DEFAULT_FX)) {
+      fxEl.value = currentFXRate.toFixed(4);
+      const liveLabel = document.getElementById('fx-live-label');
+      if (liveLabel) liveLabel.textContent = currentFXRate.toFixed(4);
+    }
+  }
+  onFXChange();
 }
 
-function autoCalcCost() {
-  const qty   = parseFloat(document.getElementById('f-qty')?.value)      || 0;
-  const price = parseFloat(document.getElementById('f-buyPrice')?.value)  || 0;
+// FX Rate changed → recalculate Total Cost
+function onFXChange() {
+  const qty   = parseFloat(document.getElementById('f-qty')?.value)     || 0;
+  const price = parseFloat(document.getElementById('f-buyPrice')?.value) || 0;
   const isUS  = document.getElementById('f-market')?.value === 'US';
-  const fx    = isUS ? (parseFloat(document.getElementById('f-fx')?.value) || DEFAULT_FX) : 1;
+  const fx    = isUS ? (parseFloat(document.getElementById('f-fx')?.value) || currentFXRate) : 1;
   if (qty > 0 && price > 0) {
-    const el = document.getElementById('f-cost');
-    if (el) el.value = (qty * price * fx).toFixed(2);
+    const costEl = document.getElementById('f-cost');
+    if (costEl) costEl.value = (qty * price * fx).toFixed(2);
   }
+}
+
+// Total Cost changed → back-calculate FX Rate
+function onCostChange() {
+  const qty   = parseFloat(document.getElementById('f-qty')?.value)     || 0;
+  const price = parseFloat(document.getElementById('f-buyPrice')?.value) || 0;
+  const cost  = parseFloat(document.getElementById('f-cost')?.value)     || 0;
+  const isUS  = document.getElementById('f-market')?.value === 'US';
+  if (isUS && qty > 0 && price > 0 && cost > 0) {
+    const impliedFX = cost / (qty * price);
+    const fxEl = document.getElementById('f-fx');
+    if (fxEl) fxEl.value = impliedFX.toFixed(4);
+  }
+}
+
+// Keep backward compat — called by qty/price inputs
+function autoCalcCost() { onFXChange(); }
+
+// Fetch live USD/THB rate and fill the FX rate input
+async function fetchAndFillLiveFX() {
+  const spinner = document.getElementById('live-fx-spinner');
+  if (spinner) spinner.textContent = '⏳';
+
+  const rate = await fetchLiveFXRate();
+
+  if (spinner) spinner.textContent = '🔄';
+
+  const fxEl = document.getElementById('f-fx');
+  if (fxEl) fxEl.value = rate.toFixed(4);
+
+  const liveLabel = document.getElementById('fx-live-label');
+  if (liveLabel) liveLabel.textContent = rate.toFixed(4);
+
+  onFXChange();   // recalculate cost with new rate
+  showToast(`Live FX rate: 1 USD = ${rate.toFixed(4)} THB ✅`);
 }
 
 async function submitHoldingForm() {
@@ -1971,9 +2106,11 @@ async function init() {
   `;
   document.head.appendChild(style);
 
+  loadFXRateCache();       // restore last known FX rate instantly
   loadLastRefreshLog();    // restore last refresh log from LocalStorage cache
   loadWatchlistState();    // restore watchlist from LocalStorage
   await loadPortfolio();
+  if (!IS_LOCAL) fetchLiveFXRate();   // update FX rate in background (non-blocking)
   migrateData();
   navigateTo('dashboard');
 }
