@@ -454,7 +454,8 @@ async function fetchQuote(symbol, market) {
 
   try {
     const res = await fetch(
-      `/api/quote?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`
+      `/api/quote?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`,
+      { headers: API_HEADERS }
     );
     if (!res.ok) return null;
     return await res.json();
@@ -464,26 +465,86 @@ async function fetchQuote(symbol, market) {
   }
 }
 
-// Auto-refresh prices for all US holdings (Phase 2)
-async function refreshAllPrices() {
+// ── REFRESH ALL US PRICES (Phase 2 + 3) ───────────────────
+// Calls POST /api/refresh — server fetches Finnhub for every US holding,
+// writes prices directly to D1, returns results + timestamp.
+
+let lastRefreshLog = null;   // cached in memory; also persisted to LocalStorage
+
+function loadLastRefreshLog() {
+  try {
+    const raw = localStorage.getItem('arthy_last_refresh');
+    if (raw) lastRefreshLog = JSON.parse(raw);
+  } catch (_) {}
+}
+
+function saveLastRefreshLog(log) {
+  lastRefreshLog = log;
+  try { localStorage.setItem('arthy_last_refresh', JSON.stringify(log)); } catch (_) {}
+}
+
+async function refreshAllPrices(force = false) {
   if (IS_LOCAL) {
     showToast('Price auto-fetch is available on Cloudflare Pages (Phase 2)', 'info');
     return;
   }
 
-  showToast('Refreshing prices…');
-  let updated = 0;
-  for (const h of portfolio.holdings) {
-    if (h.market === 'US') {
-      const q = await fetchQuote(h.symbol, 'US');
-      if (q && q.price > 0) {
-        await updateHolding(h.id, { currentPrice: q.price });
-        updated++;
-      }
+  // Animate the button if visible
+  const btn = document.getElementById('btn-refresh-prices');
+  if (btn) { btn.disabled = true; btn.classList.add('animate-spin-once'); }
+
+  showToast('🔄 Refreshing prices from Finnhub…', 'info');
+
+  try {
+    const res = await fetch('/api/refresh', {
+      method : 'POST',
+      headers: API_HEADERS,
+      body   : JSON.stringify({ force }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ Refresh failed: ${err.error || res.status}`, 'error');
+      return;
     }
+
+    const log = await res.json();
+    saveLastRefreshLog(log);
+
+    // Apply updated prices to local portfolio state
+    if (log.results) {
+      for (const r of log.results) {
+        if (r.status === 'updated' && r.price > 0) {
+          const h = portfolio.holdings.find(x => x.symbol === r.symbol && x.market === 'US');
+          if (h) {
+            h.currentPrice         = r.price;
+            h.currentPriceCurrency = 'USD';
+            h.updatedAt            = new Date().toISOString();
+          }
+        }
+      }
+      savePortfolio();
+    }
+
+    showToast(`✅ ${log.updatedCount} price(s) updated · ${log.skippedCount} skipped`);
+    renderCurrentScreen();
+
+  } catch (e) {
+    console.error('refreshAllPrices error:', e);
+    showToast('❌ Could not reach the refresh API', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('animate-spin-once'); }
   }
-  showToast(`${updated} US price(s) updated ✅`);
-  renderCurrentScreen();
+}
+
+// Load cloud sync status (D1 count + last refresh log from KV)
+async function loadSyncStatus() {
+  if (IS_LOCAL) return null;
+  try {
+    const res = await fetch('/api/sync-status', { headers: API_HEADERS });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) { return null; }
 }
 
 // ── DEMO DATA ──────────────────────────────────────────────
@@ -620,6 +681,12 @@ function renderDashboard() {
         <span class="text-xs ml-1">(${gSign}${totalGainLossPercent.toFixed(2)}%)</span>
       </p>
       <p class="text-xs text-slate-500 mt-1">Cost basis ${fmt(totalCostTHB)}</p>
+      <div class="mt-3 flex items-center justify-between gap-2 border-t border-slate-700/40 pt-3">
+        <span class="text-xs text-slate-500">
+          🕐 Prices refreshed: <span class="text-slate-400 font-medium">${lastRefreshLog ? timeAgo(lastRefreshLog.refreshedAt) : (IS_LOCAL ? 'manual only' : 'never')}</span>
+        </span>
+        ${!IS_LOCAL ? `<button onclick="refreshAllPrices(false)" class="text-xs text-emerald-400 hover:text-emerald-300 active:scale-95 transition-all">⟳ Refresh</button>` : ''}
+      </div>
     </div>
     <div class="grid grid-cols-2 gap-3">
       <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
@@ -868,13 +935,12 @@ function renderCoach() {
 
 function renderSettings() {
   const holdingCount = portfolio.holdings.length;
-  const lastSaved    = portfolio.lastUpdated
-    ? new Date(portfolio.lastUpdated).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
-    : '—';
   const storageMode  = IS_LOCAL ? 'LocalStorage (Phase 1)' : 'Cloudflare D1 (Phase 3)';
   const storageIcon  = IS_LOCAL ? '💾' : '☁️';
 
   document.getElementById('settings-content').innerHTML = `
+
+    <!-- ── App info ─────────────────────────────────── -->
     <div class="bg-slate-800/80 rounded-2xl p-5 border border-slate-700/60 text-center">
       <div class="text-4xl mb-2">📈</div>
       <p class="text-lg font-bold text-white">Arthy Investment Coach</p>
@@ -882,15 +948,96 @@ function renderSettings() {
       <div class="mt-3 grid grid-cols-2 gap-3 text-center">
         <div class="bg-slate-900/50 rounded-xl p-2.5">
           <p class="text-xl font-bold text-emerald-400">${holdingCount}</p>
-          <p class="text-xs text-slate-400">Holdings</p>
+          <p class="text-xs text-slate-400">Local Holdings</p>
         </div>
         <div class="bg-slate-900/50 rounded-xl p-2.5">
           <p class="text-xs font-medium text-white leading-tight">${storageIcon} ${storageMode}</p>
-          <p class="text-xs text-slate-400 mt-0.5">Saved: ${lastSaved}</p>
+          <p class="text-xs text-slate-400 mt-0.5" id="lbl-last-local-save">—</p>
         </div>
       </div>
     </div>
 
+    <!-- ── Cloud Data Status ─────────────────────────── -->
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-sm font-semibold text-white">☁️ Cloud Data (Cloudflare)</p>
+        <span id="cloud-status-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
+      </div>
+
+      <!-- D1 row -->
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <div class="bg-slate-900/60 rounded-xl p-3">
+          <p class="text-xs text-slate-400 mb-0.5">D1 Holdings</p>
+          <p class="text-lg font-bold text-emerald-400" id="d1-holdings-count">
+            <span class="text-slate-500 text-xs">loading…</span>
+          </p>
+          <p class="text-xs text-slate-500" id="d1-last-updated">—</p>
+        </div>
+        <div class="bg-slate-900/60 rounded-xl p-3">
+          <p class="text-xs text-slate-400 mb-0.5">KV Cache</p>
+          <p class="text-sm font-medium text-white" id="kv-status">
+            <span class="text-slate-500 text-xs">loading…</span>
+          </p>
+        </div>
+      </div>
+
+      <!-- Last refresh row -->
+      <div class="bg-slate-900/60 rounded-xl p-3 mb-3">
+        <div class="flex items-start justify-between gap-2">
+          <div>
+            <p class="text-xs text-slate-400 mb-0.5">Last Price Refresh</p>
+            <p class="text-sm font-semibold text-white" id="lbl-last-refresh-time">
+              <span class="text-slate-500 text-xs">loading…</span>
+            </p>
+            <p class="text-xs text-slate-500 mt-0.5" id="lbl-last-refresh-ago"></p>
+          </div>
+          <div class="text-right shrink-0">
+            <p class="text-xs text-slate-400 mb-0.5">Updated</p>
+            <p class="text-sm font-semibold text-emerald-400" id="lbl-last-refresh-count">—</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Per-symbol results table -->
+      <div id="refresh-results-table" class="hidden">
+        <p class="text-xs text-slate-400 font-semibold mb-1.5">Last Refresh Results</p>
+        <div id="refresh-results-rows" class="space-y-1"></div>
+      </div>
+    </div>
+
+    <!-- ── Refresh button ────────────────────────────── -->
+    <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
+      <p class="text-sm font-semibold text-white mb-3">Price Update</p>
+      <div class="space-y-2">
+
+        <button id="btn-refresh-prices"
+          onclick="refreshAllPrices(false).then(()=>loadAndRenderCloudStatus())"
+          class="w-full flex items-center gap-3 rounded-2xl p-3.5 transition-colors active:scale-95 text-left
+            ${IS_LOCAL ? 'bg-slate-700/30 opacity-50 cursor-not-allowed' : 'bg-emerald-700/30 hover:bg-emerald-700/50 border border-emerald-600/40'}"
+          ${IS_LOCAL ? 'disabled' : ''}>
+          <span class="text-2xl shrink-0">🔄</span>
+          <div>
+            <p class="text-sm font-semibold text-white">Refresh US Prices</p>
+            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment' : 'Fetch latest from Finnhub · KV cached 15 min'}</p>
+          </div>
+        </button>
+
+        <button id="btn-force-refresh"
+          onclick="refreshAllPrices(true).then(()=>loadAndRenderCloudStatus())"
+          class="w-full flex items-center gap-3 rounded-2xl p-3.5 transition-colors active:scale-95 text-left
+            ${IS_LOCAL ? 'bg-slate-700/30 opacity-50 cursor-not-allowed' : 'bg-slate-700/60 hover:bg-slate-700 border border-slate-600/40'}"
+          ${IS_LOCAL ? 'disabled' : ''}>
+          <span class="text-2xl shrink-0">⚡</span>
+          <div>
+            <p class="text-sm font-semibold text-white">Force Refresh (Skip Cache)</p>
+            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment' : 'Bypass KV cache — hits Finnhub directly'}</p>
+          </div>
+        </button>
+
+      </div>
+    </div>
+
+    <!-- ── Other data management ──────────────────────── -->
     <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
       <p class="text-sm font-semibold text-white mb-3">Data Management</p>
       <div class="space-y-2">
@@ -901,15 +1048,6 @@ function renderSettings() {
           <div>
             <p class="text-sm font-medium text-white">Load Sample Data</p>
             <p class="text-xs text-slate-400">VOO, QQQM, AAPL, ADVANC, CPALL</p>
-          </div>
-        </button>
-
-        <button onclick="refreshAllPrices()"
-          class="w-full flex items-center gap-3 bg-slate-700/60 hover:bg-slate-700 rounded-2xl p-3.5 transition-colors active:scale-95 text-left ${IS_LOCAL ? 'opacity-60' : ''}">
-          <span class="text-2xl shrink-0">🔄</span>
-          <div>
-            <p class="text-sm font-medium text-white">Refresh US Prices</p>
-            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment (Phase 2)' : 'Fetch latest prices from API'}</p>
           </div>
         </button>
 
@@ -934,6 +1072,7 @@ function renderSettings() {
       </div>
     </div>
 
+    <!-- ── Road map ───────────────────────────────────── -->
     <div class="bg-slate-800/80 rounded-2xl p-4 border border-slate-700/60">
       <p class="text-sm font-semibold text-white mb-3">🛣️ Road Map</p>
       <div class="space-y-2.5">
@@ -958,10 +1097,114 @@ function renderSettings() {
       <p class="text-xs text-slate-400 leading-relaxed">
         This app is for educational purposes only. It is not a real brokerage account.
         Real investments are managed by Arthy's parent through Dime.
-        Calculated values may differ from actual portfolio performance.
-        Prices are updated manually and do not reflect real-time market data (Phase 1).
+        Prices shown are from Finnhub and cached for 15 minutes.
       </p>
     </div>`;
+
+  // Fill local save time
+  const ls = portfolio.lastUpdated;
+  const lblLocal = document.getElementById('lbl-last-local-save');
+  if (lblLocal) lblLocal.textContent = ls ? 'Saved ' + timeAgo(ls) : 'Not saved yet';
+
+  // Fill from cached refresh log immediately, then fetch fresh status
+  if (lastRefreshLog) renderRefreshLog(lastRefreshLog);
+  if (!IS_LOCAL) loadAndRenderCloudStatus();
+}
+
+// Fill the Cloud Data card from /api/sync-status
+async function loadAndRenderCloudStatus() {
+  const status = await loadSyncStatus();
+  if (!status) {
+    const dot = document.getElementById('cloud-status-dot');
+    if (dot) dot.className = 'w-2 h-2 rounded-full bg-red-500';
+    return;
+  }
+
+  // Green dot
+  const dot = document.getElementById('cloud-status-dot');
+  if (dot) dot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+
+  // D1 count
+  const countEl = document.getElementById('d1-holdings-count');
+  if (countEl) countEl.innerHTML = status.d1.available
+    ? `<span class="text-emerald-400 text-lg font-bold">${status.d1.holdingsCount}</span>`
+    : '<span class="text-red-400 text-xs">Unavailable</span>';
+
+  const updEl = document.getElementById('d1-last-updated');
+  if (updEl) updEl.textContent = status.d1.lastUpdated
+    ? 'Updated ' + timeAgo(status.d1.lastUpdated)
+    : '—';
+
+  // KV
+  const kvEl = document.getElementById('kv-status');
+  if (kvEl) kvEl.innerHTML = status.kvAvailable
+    ? '<span class="text-emerald-400 text-sm">✓ Connected</span>'
+    : '<span class="text-slate-500 text-xs">Not configured</span>';
+
+  // Last refresh log
+  if (status.lastRefresh) {
+    saveLastRefreshLog(status.lastRefresh);
+    renderRefreshLog(status.lastRefresh);
+  } else {
+    const t = document.getElementById('lbl-last-refresh-time');
+    const a = document.getElementById('lbl-last-refresh-ago');
+    if (t) t.textContent = 'Never refreshed';
+    if (a) a.textContent = 'Press Refresh US Prices to start';
+  }
+}
+
+// Render the last-refresh section from a log object
+function renderRefreshLog(log) {
+  const timeEl  = document.getElementById('lbl-last-refresh-time');
+  const agoEl   = document.getElementById('lbl-last-refresh-ago');
+  const countEl = document.getElementById('lbl-last-refresh-count');
+  const tableEl = document.getElementById('refresh-results-table');
+  const rowsEl  = document.getElementById('refresh-results-rows');
+
+  if (!log || !timeEl) return;
+
+  const dt = new Date(log.refreshedAt);
+  if (timeEl) timeEl.textContent = dt.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+  if (agoEl)  agoEl.textContent  = timeAgo(log.refreshedAt);
+  if (countEl) countEl.textContent = `${log.updatedCount} updated · ${log.skippedCount} skipped`;
+
+  if (tableEl && rowsEl && log.results?.length) {
+    tableEl.classList.remove('hidden');
+    rowsEl.innerHTML = log.results.map(r => {
+      const isOk   = r.status === 'updated';
+      const chg    = r.changePercent ?? 0;
+      const chgCls = chg >= 0 ? 'text-emerald-400' : 'text-red-400';
+      const chgStr = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+      return `
+        <div class="flex items-center justify-between bg-slate-900/50 rounded-xl px-3 py-2">
+          <div class="flex items-center gap-2">
+            <span class="text-xs">${isOk ? '✅' : '❌'}</span>
+            <span class="text-sm font-semibold text-white">${escHtml(r.symbol)}</span>
+            ${isOk ? `<span class="text-xs text-slate-400">$${r.price?.toFixed(2) ?? '—'}</span>` : ''}
+          </div>
+          <div class="text-right">
+            ${isOk
+              ? `<span class="text-xs font-semibold ${chgCls}">${chgStr}</span>
+                 <p class="text-xs text-slate-500">${r.source === 'cache' ? 'cached' : 'live'}</p>`
+              : `<span class="text-xs text-red-400">${escHtml(r.reason || r.status)}</span>`
+            }
+          </div>
+        </div>`;
+    }).join('');
+  }
+}
+
+// ── TIME AGO helper ───────────────────────────────────────
+function timeAgo(isoStr) {
+  if (!isoStr) return '—';
+  const diffMs = Date.now() - new Date(isoStr).getTime();
+  const mins   = Math.floor(diffMs / 60000);
+  const hours  = Math.floor(mins / 60);
+  const days   = Math.floor(hours / 24);
+  if (mins  <  1) return 'just now';
+  if (mins  <  60) return `${mins} min ago`;
+  if (hours <  24) return `${hours} hr ago`;
+  return `${days} day${days > 1 ? 's' : ''} ago`;
 }
 
 // ── FORM: ADD / EDIT ───────────────────────────────────────
@@ -1302,6 +1545,7 @@ async function init() {
   `;
   document.head.appendChild(style);
 
+  loadLastRefreshLog();   // restore last refresh log from LocalStorage cache
   await loadPortfolio();
   migrateData();
   navigateTo('dashboard');
