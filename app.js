@@ -465,6 +465,33 @@ async function fetchQuote(symbol, market) {
   }
 }
 
+/**
+ * Fetch historical OHLCV data for a holding via Yahoo Finance.
+ * @param {string} symbol   e.g. "PTT" or "AAPL"
+ * @param {string} market   "US" | "TH"
+ * @param {string} period   "7d" | "1mo" | "3mo" | "6mo" | "1y" (default "3mo")
+ * @param {string} [start]  ISO date "2024-01-01" (optional)
+ * @param {string} [end]    ISO date "2024-12-31" (optional)
+ * @returns {Promise<{rows:[],currency,symbol}|null>}
+ */
+async function fetchPriceHistory(symbol, market, period = '3mo', start = '', end = '') {
+  if (IS_LOCAL) return null;
+
+  const params = new URLSearchParams({
+    symbol, market,
+    ...(start ? { start, end } : { period }),
+  });
+
+  try {
+    const res = await fetch(`/api/history?${params}`, { headers: API_HEADERS });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn('fetchPriceHistory failed:', e);
+    return null;
+  }
+}
+
 // ── REFRESH ALL US PRICES (Phase 2 + 3) ───────────────────
 // Calls POST /api/refresh — server fetches Finnhub for every US holding,
 // writes prices directly to D1, returns results + timestamp.
@@ -493,7 +520,7 @@ async function refreshAllPrices(force = false) {
   const btn = document.getElementById('btn-refresh-prices');
   if (btn) { btn.disabled = true; btn.classList.add('animate-spin-once'); }
 
-  showToast('🔄 Refreshing prices from Finnhub…', 'info');
+  showToast('🔄 Refreshing prices from Yahoo Finance…', 'info');
 
   try {
     const res = await fetch('/api/refresh', {
@@ -1018,7 +1045,7 @@ function renderSettings() {
           <span class="text-2xl shrink-0">🔄</span>
           <div>
             <p class="text-sm font-semibold text-white">Refresh US Prices</p>
-            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment' : 'Fetch latest from Finnhub · KV cached 15 min'}</p>
+            <p class="text-xs text-slate-400">${IS_LOCAL ? 'Available on Cloudflare deployment' : 'US + TH stocks via Yahoo Finance · KV cached 15 min'}</p>
           </div>
         </button>
 
@@ -1078,7 +1105,7 @@ function renderSettings() {
       <div class="space-y-2.5">
         ${[
           ['✅', 'Phase 1', 'LocalStorage — fully working', 'text-emerald-400'],
-          ['✅', 'Phase 2', 'Cloudflare Worker — US price auto-fetch', 'text-emerald-400'],
+          ['✅', 'Phase 2', 'Yahoo Finance — US + TH price auto-fetch, history', 'text-emerald-400'],
           [IS_LOCAL ? '⏳' : '✅', 'Phase 3', 'Cloudflare D1 — permanent cloud storage', IS_LOCAL ? 'text-slate-500' : 'text-emerald-400'],
           ['⏳', 'Phase 4', 'Claude AI Coach via Cloudflare Worker', 'text-slate-500'],
         ].map(([icon, phase, desc, cls]) => `
@@ -1097,7 +1124,7 @@ function renderSettings() {
       <p class="text-xs text-slate-400 leading-relaxed">
         This app is for educational purposes only. It is not a real brokerage account.
         Real investments are managed by Arthy's parent through Dime.
-        Prices shown are from Finnhub and cached for 15 minutes.
+        Prices shown are from Yahoo Finance and cached for 15 minutes.
       </p>
     </div>`;
 

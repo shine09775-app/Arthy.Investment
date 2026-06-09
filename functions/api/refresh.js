@@ -1,23 +1,27 @@
 /**
  * POST /api/refresh
  *
- * Bulk-refresh US stock prices for all holdings in D1.
- * - Fetches fresh quotes from Finnhub (bypasses KV cache when force=true)
+ * Bulk-refresh prices for ALL holdings (US + TH) in D1 via Yahoo Finance.
+ * - No API key required (Yahoo Finance is public)
  * - Updates D1 current_price + updated_at for each holding
- * - Stores last-refresh summary in KV under key "refresh:last"
+ * - Stores refresh log in KV under "refresh:last"
+ * - force=true in body bypasses KV cache
  *
- * Returns:
- *   { refreshedAt, updatedCount, skippedCount, results: [{symbol,price,changePercent,...}] }
+ * Symbol mapping:
+ *   US market → symbol as-is      (AAPL, VOO)
+ *   TH market → symbol + ".BK"   (PTT.BK, ADVANC.BK)
  *
  * Auth: X-App-Secret header required.
  */
 
 const PORTFOLIO_ID  = 'arthy-001';
 const SYMBOL_REGEX  = /^[A-Z0-9.\-]{1,12}$/;
-const CACHE_TTL     = 900;   // 15 min KV cache
+const CACHE_TTL     = 900;   // 15 min
+const YF_BASE       = 'https://query1.finance.yahoo.com/v8/finance/chart';
+
 const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
 
-// ── Auth helper ───────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────
 
 function checkAuth(request, env) {
   const secret = env.APP_SECRET;
@@ -34,32 +38,24 @@ export async function onRequestPost({ request, env }) {
   if (!env.DB)
     return json({ error: 'D1 not configured' }, 503);
 
-  if (!env.STOCK_API_KEY)
-    return json({ error: 'STOCK_API_KEY secret not configured' }, 503);
-
-  // Optional: force=true bypasses KV cache
   let force = false;
-  try {
-    const body = await request.json().catch(() => ({}));
-    force = !!body.force;
-  } catch (_) {}
+  try { ({ force = false } = await request.json()); } catch (_) {}
 
-  // 1. Load all US holdings from D1
-  let usHoldings = [];
+  // 1. Load ALL holdings (US + TH) from D1
+  let holdings = [];
   try {
     const { results } = await env.DB.prepare(
       `SELECT id, symbol, market FROM holdings
-       WHERE portfolio_id = ? AND market = 'US'
-       ORDER BY created_at ASC`
+       WHERE portfolio_id = ? ORDER BY created_at ASC`
     ).bind(PORTFOLIO_ID).all();
-    usHoldings = results;
+    holdings = results;
   } catch (err) {
     console.error('refresh: D1 fetch error', err.message);
     return json({ error: 'Failed to read holdings from D1' }, 500);
   }
 
-  if (usHoldings.length === 0)
-    return json({ refreshedAt: new Date().toISOString(), updatedCount: 0, skippedCount: 0, results: [] }, 200);
+  if (holdings.length === 0)
+    return json({ refreshedAt: new Date().toISOString(), updatedCount: 0, skippedCount: 0, results: [] });
 
   // 2. Fetch quotes and update D1
   const refreshedAt = new Date().toISOString();
@@ -67,19 +63,25 @@ export async function onRequestPost({ request, env }) {
   let updatedCount  = 0;
   let skippedCount  = 0;
 
-  for (const holding of usHoldings) {
-    const { id, symbol } = holding;
-
-    if (!SYMBOL_REGEX.test(symbol)) {
+  for (const { id, symbol, market } of holdings) {
+    // Only US and TH supported via Yahoo Finance
+    if (!['US', 'TH'].includes(market)) {
       skippedCount++;
-      results.push({ symbol, status: 'skipped', reason: 'invalid symbol' });
+      results.push({ symbol, market, status: 'skipped', reason: `market ${market} not supported` });
       continue;
     }
 
-    // Check KV cache (unless force refresh)
-    const cacheKey = `quote:US:${symbol}`;
-    let quoteData = null;
+    if (!SYMBOL_REGEX.test(symbol)) {
+      skippedCount++;
+      results.push({ symbol, market, status: 'skipped', reason: 'invalid symbol' });
+      continue;
+    }
 
+    const yfSymbol = market === 'TH' ? symbol + '.BK' : symbol;
+    const cacheKey = `quote:${market}:${symbol}`;
+
+    // Check KV cache (unless force)
+    let quoteData = null;
     if (!force && env.QUOTE_CACHE) {
       try {
         const cached = await env.QUOTE_CACHE.get(cacheKey, { type: 'json' });
@@ -87,11 +89,10 @@ export async function onRequestPost({ request, env }) {
       } catch (_) {}
     }
 
-    // Fetch from Finnhub if not cached
+    // Fetch from Yahoo Finance if not cached
     if (!quoteData) {
       try {
-        quoteData = await fetchFinnhub(symbol, env.STOCK_API_KEY);
-        // Update KV cache
+        quoteData = await fetchYahooFinance(symbol, market, yfSymbol);
         if (env.QUOTE_CACHE) {
           await env.QUOTE_CACHE.put(cacheKey, JSON.stringify(quoteData), {
             expirationTtl: CACHE_TTL,
@@ -100,24 +101,29 @@ export async function onRequestPost({ request, env }) {
         quoteData.source = 'api';
       } catch (err) {
         skippedCount++;
-        results.push({ symbol, status: 'error', reason: err.message });
+        results.push({ symbol, market, status: 'error', reason: err.message });
         continue;
       }
     }
 
-    // Update D1 current_price and updated_at
+    // Update D1
     try {
       await env.DB.prepare(
         `UPDATE holdings
-         SET current_price = ?, current_price_currency = 'USD', updated_at = datetime('now')
+         SET current_price = ?,
+             current_price_currency = ?,
+             updated_at = datetime('now')
          WHERE id = ?`
-      ).bind(quoteData.price, id).run();
+      ).bind(quoteData.price, quoteData.currency, id).run();
 
       updatedCount++;
       results.push({
         symbol,
+        market,
+        yfSymbol,
         status        : 'updated',
         price         : quoteData.price,
+        currency      : quoteData.currency,
         previousClose : quoteData.previousClose,
         change        : quoteData.change,
         changePercent : quoteData.changePercent,
@@ -126,17 +132,17 @@ export async function onRequestPost({ request, env }) {
       });
     } catch (err) {
       skippedCount++;
-      results.push({ symbol, status: 'db-error', reason: err.message });
+      results.push({ symbol, market, status: 'db-error', reason: err.message });
     }
   }
 
-  // 3. Store refresh log in KV
+  // 3. Store refresh log in KV (7 day TTL)
   const logEntry = { refreshedAt, updatedCount, skippedCount, results };
   if (env.QUOTE_CACHE) {
     await env.QUOTE_CACHE.put(
       'refresh:last',
       JSON.stringify(logEntry),
-      { expirationTtl: 60 * 60 * 24 * 7 }  // keep 7 days
+      { expirationTtl: 60 * 60 * 24 * 7 }
     ).catch(() => {});
   }
 
@@ -147,29 +153,44 @@ export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: cors });
 }
 
-// ── Finnhub fetch ─────────────────────────────────────────
+// ── Yahoo Finance fetch ───────────────────────────────────
 
-async function fetchFinnhub(symbol, apiKey) {
-  const res = await fetch(
-    `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${apiKey}`,
-    { headers: { 'User-Agent': 'arthy-investment-coach/2.0' } }
-  );
-  if (!res.ok) throw new Error(`Finnhub HTTP ${res.status}`);
-  const raw = await res.json();
-  if (!raw || raw.c === 0) throw new Error('Empty quote — check symbol');
+async function fetchYahooFinance(symbol, market, yfSymbol) {
+  const url = `${YF_BASE}/${encodeURIComponent(yfSymbol)}?interval=1d&range=1d`;
+
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; ArthyInvestmentCoach/2.0)',
+      'Accept'    : 'application/json',
+    },
+  });
+
+  if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status} for ${yfSymbol}`);
+
+  const data   = await res.json();
+  const result = data?.chart?.result?.[0];
+  if (!result) {
+    const errMsg = data?.chart?.error?.description || `Symbol ${yfSymbol} not found`;
+    throw new Error(errMsg);
+  }
+
+  const meta  = result.meta;
+  const price = meta.regularMarketPrice ?? meta.previousClose ?? 0;
+  const prev  = meta.previousClose ?? meta.chartPreviousClose ?? price;
+  const chg   = price - prev;
+
   return {
     symbol,
-    market        : 'US',
-    price         : raw.c   ?? 0,
-    currency      : 'USD',
-    previousClose : raw.pc  ?? 0,
-    change        : raw.d   ?? 0,
-    changePercent : raw.dp  ?? 0,
-    updatedAt     : new Date((raw.t ?? Date.now() / 1000) * 1000).toISOString(),
+    market,
+    yfSymbol,
+    price,
+    currency     : meta.currency ?? (market === 'US' ? 'USD' : 'THB'),
+    previousClose: prev,
+    change       : chg,
+    changePercent: prev > 0 ? (chg / prev) * 100 : 0,
+    updatedAt    : new Date((meta.regularMarketTime ?? Date.now() / 1000) * 1000).toISOString(),
   };
 }
-
-// ── Helper ────────────────────────────────────────────────
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: cors });
