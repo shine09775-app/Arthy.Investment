@@ -597,6 +597,24 @@ async function refreshAllPrices(force = false) {
   }
 }
 
+// Portfolio-screen refresh button handler
+async function portfolioRefresh() {
+  const btn  = document.getElementById('ptf-refresh-btn');
+  const icon = document.getElementById('ptf-refresh-icon');
+  if (btn) { btn.disabled = true; if (icon) icon.style.animation = 'spin 1s linear infinite'; }
+  await refreshAllPrices(false);
+  updatePortfolioRefreshLabel();
+  if (btn) { btn.disabled = false; if (icon) icon.style.animation = ''; }
+}
+
+function updatePortfolioRefreshLabel() {
+  const el = document.getElementById('ptf-refresh-time');
+  if (!el) return;
+  el.textContent = lastRefreshLog
+    ? timeAgo(lastRefreshLog.refreshedAt)
+    : (IS_LOCAL ? 'manual only' : 'never');
+}
+
 // Fetch live USD/THB FX rate from /api/fx and update currentFXRate
 async function fetchLiveFXRate() {
   if (IS_LOCAL) return currentFXRate;
@@ -1231,6 +1249,7 @@ function renderDashboard() {
 function renderPortfolio() {
   const m    = calcPortfolio();
   const cont = document.getElementById('portfolio-list');
+  updatePortfolioRefreshLabel();
 
   if (!m.holdings.length) {
     cont.innerHTML = `
