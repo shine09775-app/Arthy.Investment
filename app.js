@@ -93,6 +93,21 @@ async function apiDeleteHolding(id) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
+// Phase 4: Claude AI Coach — POST minimal portfolio data, get a Thai summary.
+async function apiCoachMonthlySummary(payload) {
+  const res = await fetch('/api/coach/monthly-summary', {
+    method : 'POST',
+    headers: API_HEADERS,
+    body   : JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const e = await res.json(); if (e.error) msg = e.error; } catch (_) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 // ── LOCALSTORAGE ───────────────────────────────────────────
 
 function lsLoad() {
@@ -1426,8 +1441,120 @@ function renderCoach() {
       </div>
     </div>
 
+    <!-- ── Phase 4: Claude AI Coach ─────────────────────── -->
+    <div class="bg-gradient-to-br from-purple-900/30 to-slate-800/80 rounded-2xl p-4 border border-purple-500/30">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-sm font-semibold text-purple-300">✨ Claude AI Coach</p>
+        <span class="text-[10px] text-purple-400/70 bg-purple-500/10 px-2 py-0.5 rounded-full">Phase 4</span>
+      </div>
+      <p class="text-xs text-slate-400 leading-relaxed mb-3">
+        ให้ Claude ช่วยสรุปพัฒนาการการลงทุนเป็นภาษาไทยแบบเฉพาะตัว (เพื่อการเรียนรู้ ไม่ใช่คำแนะนำซื้อขาย)
+      </p>
+      ${IS_LOCAL
+        ? `<p class="text-xs text-amber-400/80">⚠️ ใช้ได้เมื่อ deploy บน Cloudflare แล้วเท่านั้น (ต้องตั้งค่า ANTHROPIC_API_KEY)</p>`
+        : `<button id="ai-coach-btn" onclick="requestAICoach()"
+             class="w-full bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold rounded-xl py-2.5 transition">
+             🤖 ขอ Claude วิเคราะห์เดือนนี้
+           </button>`}
+      <div id="ai-coach-result" class="mt-3"></div>
+    </div>
+
     <div class="bg-amber-900/10 rounded-2xl p-4 border border-amber-500/20 text-center space-y-1">
       <p class="text-xs text-amber-400 font-medium">⚠️ For learning only. Not investment advice.</p>
+    </div>`;
+}
+
+// ── PHASE 4: CLAUDE AI COACH ───────────────────────────────
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function requestAICoach() {
+  const btn = document.getElementById('ai-coach-btn');
+  const out = document.getElementById('ai-coach-result');
+  if (!out) return;
+
+  const m = calcPortfolio();
+  if (!m.holdings.length) {
+    out.innerHTML = '<p class="text-xs text-amber-400">ยังไม่มีรายการถือครอง — เพิ่มหุ้นก่อนเพื่อให้ Claude วิเคราะห์</p>';
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Claude กำลังวิเคราะห์…'; }
+  out.innerHTML = '<p class="text-xs text-slate-400">กำลังส่งข้อมูลให้ Claude…</p>';
+
+  // Build a minimal, non-PII payload — symbols + ratios only.
+  const total = m.totalValueTHB || 0;
+  const payload = {
+    month: new Date().toISOString().slice(0, 7),
+    portfolio: {
+      totalValueTHB       : total,
+      totalGainLossPercent: m.totalGainLossPercent,
+      holdings: m.holdings.map(h => ({
+        symbol         : h.symbol,
+        market         : h.market,
+        assetType      : h.assetType,
+        category       : h.category,
+        allocationPct  : total > 0 ? (h.currentValueTHB / total) * 100 : 0,
+        gainLossPercent: h.gainLossPercent,
+        hasNote        : !!(h.learningNote || '').trim(),
+      })),
+    },
+  };
+
+  try {
+    const s = await apiCoachMonthlySummary(payload);
+    renderAICoachResult(s);
+  } catch (err) {
+    out.innerHTML = `<p class="text-xs text-red-400">❌ ${err.message}</p>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 ขอ Claude วิเคราะห์อีกครั้ง'; }
+  }
+}
+
+function renderAICoachResult(s) {
+  const out = document.getElementById('ai-coach-result');
+  if (!out) return;
+
+  const score      = typeof s.healthScore === 'number' ? s.healthScore : null;
+  const scoreColor = score >= 70 ? 'text-emerald-400' : score >= 40 ? 'text-amber-400' : 'text-red-400';
+
+  const list = (items, color) => (items || []).map(item => `
+    <li class="flex gap-2 text-xs text-slate-300">
+      <span class="${color} shrink-0">•</span>
+      <span class="leading-relaxed">${escapeHtml(item)}</span>
+    </li>`).join('');
+
+  out.innerHTML = `
+    <div class="space-y-3 bg-slate-900/50 rounded-xl p-3 border border-purple-500/20">
+      ${score !== null ? `
+        <div class="flex items-center gap-2">
+          <span class="text-2xl font-bold ${scoreColor}">${score}</span>
+          <span class="text-xs text-slate-500">/100 · Claude health score</span>
+        </div>` : ''}
+      ${s.summary ? `<p class="text-xs text-slate-200 leading-relaxed">${escapeHtml(s.summary)}</p>` : ''}
+      ${(s.whatWentWell || []).length ? `
+        <div>
+          <p class="text-xs font-semibold text-emerald-400 mb-1">✅ ทำได้ดี</p>
+          <ul class="space-y-1">${list(s.whatWentWell, 'text-emerald-500')}</ul>
+        </div>` : ''}
+      ${(s.whatToReview || []).length ? `
+        <div>
+          <p class="text-xs font-semibold text-amber-400 mb-1">🔍 สิ่งที่ควรทบทวน</p>
+          <ul class="space-y-1">${list(s.whatToReview, 'text-amber-500')}</ul>
+        </div>` : ''}
+      ${(s.questions || []).length ? `
+        <div>
+          <p class="text-xs font-semibold text-purple-400 mb-1">💭 คำถามชวนคิด</p>
+          <ul class="space-y-1">${list(s.questions, 'text-purple-400')}</ul>
+        </div>` : ''}
+      <p class="text-[10px] text-slate-500 pt-1">สร้างโดย Claude · เพื่อการเรียนรู้เท่านั้น ไม่ใช่คำแนะนำการลงทุน</p>
     </div>`;
 }
 
@@ -1571,7 +1698,7 @@ function renderSettings() {
           ['✅', 'Phase 1', 'LocalStorage — fully working', 'text-emerald-400'],
           ['✅', 'Phase 2', 'Yahoo Finance — US + TH price auto-fetch, history', 'text-emerald-400'],
           [IS_LOCAL ? '⏳' : '✅', 'Phase 3', 'Cloudflare D1 — permanent cloud storage', IS_LOCAL ? 'text-slate-500' : 'text-emerald-400'],
-          ['⏳', 'Phase 4', 'Claude AI Coach via Cloudflare Worker', 'text-slate-500'],
+          [IS_LOCAL ? '⏳' : '✅', 'Phase 4', 'Claude AI Coach via Cloudflare Worker', IS_LOCAL ? 'text-slate-500' : 'text-emerald-400'],
         ].map(([icon, phase, desc, cls]) => `
           <div class="flex items-start gap-3">
             <span class="shrink-0 mt-0.5">${icon}</span>

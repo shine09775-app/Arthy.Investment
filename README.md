@@ -126,9 +126,17 @@ TH prices remain manual until a suitable API is sourced.
 
 ---
 
-### ⏳ Phase 4 — AI Coach via Claude API
+### ✅ Phase 4 — AI Coach via Claude API
 
-**Goal:** Replace rule-based coach with Claude (claude-sonnet or claude-haiku) for richer, more personalised monthly summaries.
+**Goal:** Add a Claude-generated monthly summary alongside the rule-based coach for richer, more personalised feedback.
+
+**Status:** Implemented as a Cloudflare Pages Function — `functions/api/coach/monthly-summary.js`.
+The Coach screen shows a "ขอ Claude วิเคราะห์เดือนนี้" button (only when deployed; hidden in local mode).
+
+**Setup:**
+1. `wrangler pages secret put ANTHROPIC_API_KEY` — paste your Anthropic API key
+2. (optional) set `COACH_MODEL` var — defaults to `claude-haiku-4-5`; use `claude-sonnet-4-6` for richer output
+3. Deploy: `wrangler pages deploy .`
 
 **Worker endpoint:** `POST /api/coach/monthly-summary`
 

@@ -47,8 +47,14 @@ database_id   = "ca25226a-e8aa-43df-b252-6ae495c5cb34"
 PORTFOLIO_ID = "arthy-001"
 
 # ── Secrets (set via dashboard or `wrangler pages secret put`) ──
-# STOCK_API_KEY     = your Finnhub or Polygon.io API key
-# ANTHROPIC_API_KEY = for Phase 4 AI Coach (future)
+# STOCK_API_KEY     = your Finnhub or Polygon.io API key (Phase 2 — unused with Yahoo)
+# APP_SECRET        = shared secret guarding the API (must match APP_SECRET in app.js)
+# ANTHROPIC_API_KEY = Phase 4 Claude AI Coach — required for /api/coach/monthly-summary
+#                     wrangler pages secret put ANTHROPIC_API_KEY
+#
+# Optional non-secret override for the coach model (defaults to claude-haiku-4-5):
+# [vars]
+# COACH_MODEL = "claude-haiku-4-5"   # or "claude-sonnet-4-6" for richer summaries
 
 # ── Local dev (wrangler pages dev .) ────────────────────────
 # When running locally:
