@@ -21,7 +21,7 @@
  * Response:
  *   {
  *     "healthScore": 78,
- *     "summary": "เดือนนี้ Arthy ...",
+ *     "summary": "This month Arthy ...",
  *     "whatWentWell": ["..."],
  *     "whatToReview": ["..."],
  *     "questions": ["?", "?", "?"],
@@ -103,20 +103,20 @@ function buildPrompt(portfolio, holdings, month) {
     const mkt   = String(h.market || '').slice(0, 6);
     const alloc = num(h.allocationPct);
     const pl    = num(h.gainLossPercent);
-    const note  = h.hasNote ? 'มีโน้ต' : 'ไม่มีโน้ต';
-    return `- ${sym} (${mkt}, ${type}${cat ? ', ' + cat : ''}): สัดส่วน ${alloc.toFixed(1)}%, กำไร/ขาดทุน ${pl >= 0 ? '+' : ''}${pl.toFixed(1)}%, ${note}`;
+    const note  = h.hasNote ? 'has a learning note' : 'no learning note';
+    return `- ${sym} (${mkt}, ${type}${cat ? ', ' + cat : ''}): allocation ${alloc.toFixed(1)}%, gain/loss ${pl >= 0 ? '+' : ''}${pl.toFixed(1)}%, ${note}`;
   });
 
   return [
-    month ? `ข้อมูลพอร์ตประจำเดือน ${month}` : 'ข้อมูลพอร์ตปัจจุบัน',
-    `มูลค่ารวมโดยประมาณ: ${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} บาท`,
-    `กำไร/ขาดทุนรวม: ${totalPL >= 0 ? '+' : ''}${totalPL.toFixed(1)}%`,
-    `จำนวนรายการถือครอง: ${holdings.length}`,
+    month ? `Portfolio data for ${month}` : 'Current portfolio data',
+    `Approximate total value: ${totalValue.toLocaleString('en-US', { maximumFractionDigits: 0 })} THB`,
+    `Total gain/loss: ${totalPL >= 0 ? '+' : ''}${totalPL.toFixed(1)}%`,
+    `Number of holdings: ${holdings.length}`,
     '',
-    'รายการถือครอง:',
+    'Holdings:',
     ...lines,
     '',
-    'ช่วยสรุปพัฒนาการการลงทุนของ Arthy ในเดือนนี้ และสิ่งที่ควรเรียนรู้ต่อ',
+    "Please summarise Arthy's investing progress this month and what to learn next.",
   ].join('\n');
 }
 
@@ -127,9 +127,9 @@ Your role is to help Arthy understand what happened in the portfolio this month
 and what to learn next. You MUST NOT give buy, sell, or price predictions, and you
 must not tell Arthy to add, reduce, or hold any specific security.
 Always frame feedback as learning opportunities.
-Respond in Thai. Keep it encouraging, warm, and educational, suitable for a teenager.
+Respond in English. Keep it encouraging, warm, and educational, suitable for a teenager.
 healthScore is 0-100 reflecting diversification and learning habits (notes, ETF core,
-concentration). whatWentWell, whatToReview, and questions each contain 2-4 short Thai
+concentration). whatWentWell, whatToReview, and questions each contain 2-4 short
 sentences. questions are reflective questions for Arthy to think about — not advice.`;
 
 const RESPONSE_SCHEMA = {
